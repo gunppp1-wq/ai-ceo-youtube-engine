@@ -9,6 +9,9 @@
       "database_id": "304e3901-b41c-4a16-83a2-6d350528a935"
     }
   ],
+  "ai": {
+    "binding": "AI"
+  },
   "triggers": {
     "crons": ["0 * * * *"]
   }
