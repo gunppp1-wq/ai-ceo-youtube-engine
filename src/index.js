@@ -10,8 +10,22 @@
   },
 
   async scheduled(event, env, ctx) {
-    await env.ai_ceo_memory.prepare(
-      "INSERT INTO trends (topic, source, score) VALUES (?, ?, ?)"
-    ).bind("auto-collected trend", "scheduled-job", Math.random()).run();
+    const url = `https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics&chart=mostPopular&maxResults=10&regionCode=US&key=${env.YOUTUBE_API_KEY}`;
+    const res = await fetch(url);
+    const data = await res.json();
+
+    if (!data.items) {
+      console.log("No items returned", JSON.stringify(data));
+      return;
+    }
+
+    for (const item of data.items) {
+      const title = item.snippet.title;
+      const views = parseInt(item.statistics.viewCount || "0", 10);
+
+      await env.ai_ceo_memory.prepare(
+        "INSERT INTO trends (topic, source, score) VALUES (?, ?, ?)"
+      ).bind(title, "youtube_trending", views).run();
+    }
   }
 };
