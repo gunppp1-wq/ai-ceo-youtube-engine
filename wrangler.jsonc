@@ -1,4 +1,4 @@
-{
+﻿{
   "name": "ai-ceo-orchestrator",
   "main": "src/index.js",
   "compatibility_date": "2026-06-19",
@@ -8,5 +8,8 @@
       "database_name": "ai-ceo-memory",
       "database_id": "304e3901-b41c-4a16-83a2-6d350528a935"
     }
-  ]
+  ],
+  "triggers": {
+    "crons": ["0 * * * *"]
+  }
 }
