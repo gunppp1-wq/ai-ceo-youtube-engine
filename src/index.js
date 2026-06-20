@@ -176,7 +176,7 @@ export default {
       }
 
       const topOpportunities = await env.ai_ceo_memory.prepare(
-        "SELECT * FROM opportunities WHERE status IN ('ready', 'needs_commentary_angle') ORDER BY profit_score DESC LIMIT 3"
+        "SELECT * FROM opportunities WHERE status IN ('ready', 'needs_commentary_angle') ORDER BY profit_score DESC LIMIT 1"
       ).all();
 
       for (const opp of topOpportunities.results) {
