@@ -64,7 +64,6 @@ async function checkAndIncrementDailyLimit(env, opType) {
   return true;
 }
 
-// --- SHARED SAFETY GATE: absolute, evaluated before any profit logic ---
 const SAFETY_BLOCKLIST = {
   violent_dangerous: ["shooting", "murder", "death", "war crime", "explosion", "terrorist", "weapon sale", "torture", "execution", "massacre"],
   child_safety: ["child", "minor", "csam", "groom", "underage"],
@@ -274,21 +273,50 @@ export default {
           const imageBytes = Uint8Array.from(imageBinaryString, (m) => m.codePointAt(0));
 
           const authData = await b2Authorize(env);
-          const uploadUrlData = await b2GetUploadUrl(authData.apiUrl, authData.authorizationToken, env.B2_BUCKET_ID);
+          const apiUrl = authData.apiInfo.storageApi.apiUrl;
+          const downloadUrlBase = authData.apiInfo.storageApi.downloadUrl;
+          const uploadUrlData = await b2GetUploadUrl(apiUrl, authData.authorizationToken, env.B2_BUCKET_ID);
 
           const audioFileName = `audio/content_plan_${contentPlanId}.mp3`;
           const imageFileName = `images/content_plan_${contentPlanId}.jpg`;
 
           await b2UploadFile(uploadUrlData.uploadUrl, uploadUrlData.authorizationToken, audioFileName, audioBytes, "audio/mpeg");
 
-          const uploadUrlData2 = await b2GetUploadUrl(authData.apiUrl, authData.authorizationToken, env.B2_BUCKET_ID);
+          const uploadUrlData2 = await b2GetUploadUrl(apiUrl, authData.authorizationToken, env.B2_BUCKET_ID);
           await b2UploadFile(uploadUrlData2.uploadUrl, uploadUrlData2.authorizationToken, imageFileName, imageBytes, "image/jpeg");
+
+          console.log(`Video assets uploaded for content_plan_id=${contentPlanId}: ${audioFileName}, ${imageFileName}`);
+
+          const audioDownloadUrl = `${downloadUrlBase}/file/ai-ceo-media/${audioFileName}?Authorization=${authData.authorizationToken}`;
+          const imageDownloadUrl = `${downloadUrlBase}/file/ai-ceo-media/${imageFileName}?Authorization=${authData.authorizationToken}`;
+          const finalVideoFileName = `videos/content_plan_${contentPlanId}.mp4`;
+
+          console.log(`Calling Render to assemble video for content_plan_id=${contentPlanId}...`);
+          const assembleResp = await fetch("https://ai-ceo-video-assembler.onrender.com/assemble", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              imageUrl: imageDownloadUrl,
+              audioUrl: audioDownloadUrl,
+              b2KeyId: env.B2_KEY_ID,
+              b2ApplicationKey: env.B2_APPLICATION_KEY,
+              b2BucketId: env.B2_BUCKET_ID,
+              outputFileName: finalVideoFileName
+            })
+          });
+
+          if (!assembleResp.ok) {
+            const errText = await assembleResp.text();
+            throw new Error(`Render assemble failed: ${assembleResp.status} ${errText}`);
+          }
+
+          const assembleResult = await assembleResp.json();
 
           await env.ai_ceo_memory.prepare(
             "INSERT INTO videos (content_plan_id, status) VALUES (?, ?)"
-          ).bind(contentPlanId, "assets_ready").run();
+          ).bind(contentPlanId, "video_ready").run();
 
-          console.log(`Video assets uploaded for content_plan_id=${contentPlanId}: ${audioFileName}, ${imageFileName}`);
+          console.log(`Video fully assembled for content_plan_id=${contentPlanId}: ${finalVideoFileName} (fileId: ${assembleResult.fileId})`);
         } catch (videoErr) {
           console.log(`ERROR generating/uploading video assets for content_plan_id=${contentPlanId}:`, videoErr.message);
         }
