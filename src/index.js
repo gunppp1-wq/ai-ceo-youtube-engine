@@ -33,6 +33,35 @@ async function b2UploadFile(uploadUrl, uploadAuthToken, fileName, bytes, content
   return await res.json();
 }
 
+async function callRenderAssembler(payload) {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 120000);
+
+      const resp = await fetch("https://ai-ceo-video-assembler.onrender.com/assemble", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!resp.ok) {
+        const errText = await resp.text();
+        throw new Error(`Render assemble failed: ${resp.status} ${errText}`);
+      }
+
+      return await resp.json();
+    } catch (err) {
+      console.log(`Render call attempt ${attempt} failed:`, err.message);
+      if (attempt === 2) throw err;
+      console.log("Retrying Render call (likely cold start)...");
+    }
+  }
+}
+
 const DAILY_B2_OP_LIMIT = 20;
 
 async function checkAndIncrementDailyLimit(env, opType) {
@@ -291,26 +320,15 @@ export default {
           const imageDownloadUrl = `${downloadUrlBase}/file/ai-ceo-media/${imageFileName}?Authorization=${authData.authorizationToken}`;
           const finalVideoFileName = `videos/content_plan_${contentPlanId}.mp4`;
 
-          console.log(`Calling Render to assemble video for content_plan_id=${contentPlanId}...`);
-          const assembleResp = await fetch("https://ai-ceo-video-assembler.onrender.com/assemble", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              imageUrl: imageDownloadUrl,
-              audioUrl: audioDownloadUrl,
-              b2KeyId: env.B2_KEY_ID,
-              b2ApplicationKey: env.B2_APPLICATION_KEY,
-              b2BucketId: env.B2_BUCKET_ID,
-              outputFileName: finalVideoFileName
-            })
+          console.log(`Calling Render to assemble video for content_plan_id=${contentPlanId} (with retry for cold start)...`);
+          const assembleResult = await callRenderAssembler({
+            imageUrl: imageDownloadUrl,
+            audioUrl: audioDownloadUrl,
+            b2KeyId: env.B2_KEY_ID,
+            b2ApplicationKey: env.B2_APPLICATION_KEY,
+            b2BucketId: env.B2_BUCKET_ID,
+            outputFileName: finalVideoFileName
           });
-
-          if (!assembleResp.ok) {
-            const errText = await assembleResp.text();
-            throw new Error(`Render assemble failed: ${assembleResp.status} ${errText}`);
-          }
-
-          const assembleResult = await assembleResp.json();
 
           await env.ai_ceo_memory.prepare(
             "INSERT INTO videos (content_plan_id, status) VALUES (?, ?)"
