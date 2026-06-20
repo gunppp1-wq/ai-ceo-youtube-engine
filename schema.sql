@@ -45,3 +45,17 @@ CREATE TABLE IF NOT EXISTS performance (
   recorded_at TEXT DEFAULT (datetime('now')),
   FOREIGN KEY (video_id) REFERENCES videos(id)
 );
+
+CREATE TABLE IF NOT EXISTS daily_usage (
+  usage_date TEXT NOT NULL,
+  op_type TEXT NOT NULL,
+  count INTEGER DEFAULT 0,
+  PRIMARY KEY (usage_date, op_type)
+);
+
+CREATE TABLE IF NOT EXISTS system_alerts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  alert_type TEXT NOT NULL,
+  message TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
