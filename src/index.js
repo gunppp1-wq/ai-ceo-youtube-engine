@@ -117,6 +117,15 @@ function passesPlatformSafetyGate(text) {
   return { passes: true, reason: null };
 }
 
+const PERSONA = `You are "The Skeptical Fan" - a YouTube commentator persona with a consistent voice across every video:
+- You genuinely love movies, games, and music, but have zero patience for obvious marketing tricks and hype-building tactics
+- When you notice a hype tactic (logo reveals, "coming soon" teases, vague trailers), you call it out by name
+- You believe most franchises over-promise in trailers and aren't afraid to say so directly
+- Your tone is casual, confident, slightly sarcastic - never a neutral narrator voice
+- You often reference that you've seen this pattern before ("here we go again", "every single time")
+- You end scripts with a direct, personal opinion or question to the viewer, not just a summary
+- You have real opinions - state them plainly, don't hedge`;
+
 export default {
   async fetch(request, env, ctx) {
     const result = await env.ai_ceo_memory.prepare(
@@ -207,6 +216,11 @@ export default {
         "SELECT * FROM opportunities WHERE status IN ('ready', 'needs_commentary_angle') ORDER BY profit_score DESC LIMIT 1"
       ).all();
 
+      const recentPlans = await env.ai_ceo_memory.prepare(
+        "SELECT title FROM content_plans ORDER BY id DESC LIMIT 3"
+      ).all();
+      const recentTitles = recentPlans.results.map(p => p.title).join(", ");
+
       for (const opp of topOpportunities.results) {
         let success = false;
         let generatedTitle, generatedScript, contentPlanId;
@@ -216,9 +230,11 @@ export default {
             const isCommentary = opp.status === "needs_commentary_angle";
             const cleanTitle = opp.title.split(": ").slice(1).join(": ").replace(/[\u2013\u2014]/g, "-").replace(/"/g, "");
 
-            const prompt = isCommentary
-              ? `You are a YouTube scriptwriter. Write a short, energetic 30-45 second reaction/commentary script (just the spoken narration, no stage directions) reacting to this trending video: ${cleanTitle}. Also suggest a catchy, clickable video title under 60 characters. Format your response exactly as:\nTITLE: <title>\nSCRIPT: <script>`
-              : `You are a YouTube scriptwriter. Write a short, engaging 30-45 second script (just the spoken narration, no stage directions) about this trending topic: ${cleanTitle}. Also suggest a catchy, clickable video title under 60 characters. Format your response exactly as:\nTITLE: <title>\nSCRIPT: <script>`;
+            const memoryNote = recentTitles
+              ? `\n\nFor context, your recent videos covered: ${recentTitles}. If relevant, you may briefly reference one of these for continuity, but don't force it.`
+              : "";
+
+            const prompt = `${PERSONA}\n\nWrite a short, 30-45 second video script (just the spoken narration, no stage directions) about this trending topic: ${cleanTitle}.${memoryNote}\n\nGive your actual opinion - don't just summarize. Also suggest a catchy, clickable video title under 60 characters that reflects your personality. Format your response exactly as:\nTITLE: <title>\nSCRIPT: <script>`;
 
             const aiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
               messages: [{ role: "user", content: prompt }]
@@ -249,7 +265,7 @@ export default {
 
             const insertedPlan = await env.ai_ceo_memory.prepare(
               "INSERT INTO content_plans (opportunity_id, title, script, metadata) VALUES (?, ?, ?, ?) RETURNING id"
-            ).bind(opp.id, generatedTitle, generatedScript, JSON.stringify({ style: isCommentary ? "commentary" : "direct" })).first();
+            ).bind(opp.id, generatedTitle, generatedScript, JSON.stringify({ style: isCommentary ? "commentary" : "direct", persona: "skeptical_fan" })).first();
 
             contentPlanId = insertedPlan.id;
 
@@ -293,13 +309,30 @@ export default {
           const audioArrayBuffer = await ttsResp.arrayBuffer();
           const audioBytes = new Uint8Array(audioArrayBuffer);
 
-          const imagePrompt = `A vibrant, eye-catching YouTube thumbnail style image representing: ${generatedTitle}`;
-          const imgResp = await env.AI.run("@cf/black-forest-labs/flux-1-schnell", {
-            prompt: imagePrompt
-          });
+          const STYLE_GUIDE = "vibrant colors, bold contrast, dynamic angle, energetic YouTube thumbnail style, consistent visual branding";
+          const imagePrompts = [
+            `${generatedTitle}, wide establishing shot, ${STYLE_GUIDE}`,
+            `${generatedTitle}, close-up dramatic detail, ${STYLE_GUIDE}`,
+            `${generatedTitle}, reaction-style dynamic composition, ${STYLE_GUIDE}`
+          ];
 
-          const imageBinaryString = atob(imgResp.image);
-          const imageBytes = Uint8Array.from(imageBinaryString, (m) => m.codePointAt(0));
+          const imageUrls = [];
+          for (let imgIdx = 0; imgIdx < imagePrompts.length; imgIdx++) {
+            const imgResp = await env.AI.run("@cf/black-forest-labs/flux-1-schnell", {
+              prompt: imagePrompts[imgIdx]
+            });
+            const imageBinaryString = atob(imgResp.image);
+            const imgBytes = Uint8Array.from(imageBinaryString, (m) => m.codePointAt(0));
+
+            const authDataImg = await b2Authorize(env);
+            const apiUrlImg = authDataImg.apiInfo.storageApi.apiUrl;
+            const uploadUrlDataImg = await b2GetUploadUrl(apiUrlImg, authDataImg.authorizationToken, env.B2_BUCKET_ID);
+            const imageFileName = `images/content_plan_${contentPlanId}_${imgIdx}.jpg`;
+            await b2UploadFile(uploadUrlDataImg.uploadUrl, uploadUrlDataImg.authorizationToken, imageFileName, imgBytes, "image/jpeg");
+
+            const imgDownloadUrl = `${authDataImg.apiInfo.storageApi.downloadUrl}/file/ai-ceo-media/${imageFileName}?Authorization=${authDataImg.authorizationToken}`;
+            imageUrls.push(imgDownloadUrl);
+          }
 
           const authData = await b2Authorize(env);
           const apiUrl = authData.apiInfo.storageApi.apiUrl;
@@ -307,22 +340,17 @@ export default {
           const uploadUrlData = await b2GetUploadUrl(apiUrl, authData.authorizationToken, env.B2_BUCKET_ID);
 
           const audioFileName = `audio/content_plan_${contentPlanId}.mp3`;
-          const imageFileName = `images/content_plan_${contentPlanId}.jpg`;
 
           await b2UploadFile(uploadUrlData.uploadUrl, uploadUrlData.authorizationToken, audioFileName, audioBytes, "audio/mpeg");
 
-          const uploadUrlData2 = await b2GetUploadUrl(apiUrl, authData.authorizationToken, env.B2_BUCKET_ID);
-          await b2UploadFile(uploadUrlData2.uploadUrl, uploadUrlData2.authorizationToken, imageFileName, imageBytes, "image/jpeg");
-
-          console.log(`Video assets uploaded for content_plan_id=${contentPlanId}: ${audioFileName}, ${imageFileName}`);
+          console.log(`Video assets uploaded for content_plan_id=${contentPlanId}: ${audioFileName}, ${imageUrls.length} images`);
 
           const audioDownloadUrl = `${downloadUrlBase}/file/ai-ceo-media/${audioFileName}?Authorization=${authData.authorizationToken}`;
-          const imageDownloadUrl = `${downloadUrlBase}/file/ai-ceo-media/${imageFileName}?Authorization=${authData.authorizationToken}`;
           const finalVideoFileName = `videos/content_plan_${contentPlanId}.mp4`;
 
           console.log(`Calling Render to assemble video for content_plan_id=${contentPlanId} (with retry for cold start)...`);
           const assembleResult = await callRenderAssembler({
-            imageUrl: imageDownloadUrl,
+            imageUrls: imageUrls,
             audioUrl: audioDownloadUrl,
             b2KeyId: env.B2_KEY_ID,
             b2ApplicationKey: env.B2_APPLICATION_KEY,
