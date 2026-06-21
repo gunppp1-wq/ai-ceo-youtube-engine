@@ -217,25 +217,18 @@ function buildSceneHtml({ emoji, primaryColor, secondaryColor, motionType, label
 </html>`;
 }
 
-async function captureSceneFrames(env, sceneParams, numFrames, frameDurationMs) {
+async function captureSceneFrames(page, sceneParams, numFrames, frameDurationMs) {
   const html = buildSceneHtml(sceneParams);
-  const browser = await puppeteer.launch(env.BROWSER);
-  try {
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1280, height: 720 });
-    await page.setContent(html);
+  await page.setContent(html);
 
-    const frames = [];
-    for (let i = 0; i < numFrames; i++) {
-      const timeMs = i * frameDurationMs;
-      await page.evaluate((ms) => { window.setSceneTime(ms); }, timeMs);
-      const screenshot = await page.screenshot({ type: "jpeg", quality: 80 });
-      frames.push(screenshot);
-    }
-    return frames;
-  } finally {
-    await browser.close();
+  const frames = [];
+  for (let i = 0; i < numFrames; i++) {
+    const timeMs = i * frameDurationMs;
+    await page.evaluate((ms) => { window.setSceneTime(ms); }, timeMs);
+    const screenshot = await page.screenshot({ type: "jpeg", quality: 80 });
+    frames.push(screenshot);
   }
+  return frames;
 }
 
 function cleanImageDescription(desc) {
@@ -451,27 +444,35 @@ export default {
 
           console.log(`Capturing animated frames for content_plan_id=${contentPlanId}...`);
 
+          const browser = await puppeteer.launch(env.BROWSER);
+          const page = await browser.newPage();
+          await page.setViewport({ width: 1280, height: 720 });
+
           const sceneFrameUrls = [];
-          for (let sceneIdx = 0; sceneIdx < sceneDescriptions.length; sceneIdx++) {
-            const colorPair = COLOR_PAIRS[(contentPlanId + sceneIdx) % COLOR_PAIRS.length];
-            const motionType = MOTION_TYPES[(contentPlanId + sceneIdx) % MOTION_TYPES.length];
+          try {
+            for (let sceneIdx = 0; sceneIdx < sceneDescriptions.length; sceneIdx++) {
+              const colorPair = COLOR_PAIRS[(contentPlanId + sceneIdx) % COLOR_PAIRS.length];
+              const motionType = MOTION_TYPES[(contentPlanId + sceneIdx) % MOTION_TYPES.length];
 
-            const frames = await captureSceneFrames(env, {
-              emoji: sceneDescriptions[sceneIdx].emoji,
-              primaryColor: colorPair[0],
-              secondaryColor: colorPair[1],
-              motionType: motionType,
-              labelText: sceneDescriptions[sceneIdx].label
-            }, 8, 150);
+              const frames = await captureSceneFrames(page, {
+                emoji: sceneDescriptions[sceneIdx].emoji,
+                primaryColor: colorPair[0],
+                secondaryColor: colorPair[1],
+                motionType: motionType,
+                labelText: sceneDescriptions[sceneIdx].label
+              }, 6, 150);
 
-            const frameUrls = [];
-            for (let frameIdx = 0; frameIdx < frames.length; frameIdx++) {
-              const uploadUrlData = await b2GetUploadUrl(apiUrl, authToken, env.B2_BUCKET_ID);
-              const frameFileName = `frames/content_plan_${contentPlanId}_scene${sceneIdx}_frame${frameIdx}.jpg`;
-              await b2UploadFile(uploadUrlData.uploadUrl, uploadUrlData.authorizationToken, frameFileName, new Uint8Array(frames[frameIdx]), "image/jpeg");
-              frameUrls.push(`${downloadUrlBase}/file/ai-ceo-media/${frameFileName}?Authorization=${authToken}`);
+              const frameUrls = [];
+              for (let frameIdx = 0; frameIdx < frames.length; frameIdx++) {
+                const uploadUrlData = await b2GetUploadUrl(apiUrl, authToken, env.B2_BUCKET_ID);
+                const frameFileName = `frames/content_plan_${contentPlanId}_scene${sceneIdx}_frame${frameIdx}.jpg`;
+                await b2UploadFile(uploadUrlData.uploadUrl, uploadUrlData.authorizationToken, frameFileName, new Uint8Array(frames[frameIdx]), "image/jpeg");
+                frameUrls.push(`${downloadUrlBase}/file/ai-ceo-media/${frameFileName}?Authorization=${authToken}`);
+              }
+              sceneFrameUrls.push(frameUrls);
             }
-            sceneFrameUrls.push(frameUrls);
+          } finally {
+            await browser.close();
           }
 
           const uploadUrlData = await b2GetUploadUrl(apiUrl, authToken, env.B2_BUCKET_ID);
