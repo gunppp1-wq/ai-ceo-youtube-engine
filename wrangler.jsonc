@@ -2,6 +2,7 @@
   "name": "ai-ceo-orchestrator",
   "main": "src/index.js",
   "compatibility_date": "2026-06-19",
+  "compatibility_flags": ["nodejs_compat_v2"],
   "d1_databases": [
     {
       "binding": "ai_ceo_memory",
@@ -11,6 +12,9 @@
   ],
   "ai": {
     "binding": "AI"
+  },
+  "browser": {
+    "binding": "BROWSER"
   },
   "triggers": {
     "crons": ["0 * * * *"]

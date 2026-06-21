@@ -1,4 +1,6 @@
-﻿async function b2Authorize(env) {
+﻿import puppeteer from "@cloudflare/puppeteer";
+
+async function b2Authorize(env) {
   const credentials = btoa(`${env.B2_KEY_ID}:${env.B2_APPLICATION_KEY}`);
   const res = await fetch("https://api.backblazeb2.com/b2api/v3/b2_authorize_account", {
     headers: { "Authorization": `Basic ${credentials}` }
@@ -37,9 +39,9 @@ async function callRenderAssembler(payload) {
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 120000);
+      const timeoutId = setTimeout(() => controller.abort(), 170000);
 
-      const resp = await fetch("https://ai-ceo-video-assembler.onrender.com/assemble", {
+      const resp = await fetch("https://ai-ceo-video-assembler.onrender.com/assemble-frames", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -62,7 +64,7 @@ async function callRenderAssembler(payload) {
   }
 }
 
-const DAILY_B2_OP_LIMIT = 20;
+const DAILY_B2_OP_LIMIT = 30;
 
 async function checkAndIncrementDailyLimit(env, opType) {
   const today = new Date().toISOString().slice(0, 10);
@@ -125,6 +127,127 @@ const PERSONA = `You are "The Skeptical Fan" - a YouTube commentator persona wit
 - You often reference that you've seen this pattern before ("here we go again", "every single time")
 - You end scripts with a direct, personal opinion or question to the viewer, not just a summary
 - You have real opinions - state them plainly, don't hedge`;
+
+const MOTION_TYPES = ["popIn", "slideLeft", "slideRight", "pulse"];
+const COLOR_PAIRS = [
+  ["#1a1a2e", "#0f3460"],
+  ["#2d1b4e", "#6b2d5c"],
+  ["#0f2027", "#2c5364"],
+  ["#3a1c71", "#d76d77"]
+];
+
+function buildSceneHtml({ emoji, primaryColor, secondaryColor, motionType, labelText }) {
+  const motionCSS = {
+    popIn: `@keyframes sceneMotion {
+      0% { opacity: 0; transform: scale(0.5) rotate(-10deg); }
+      60% { opacity: 1; transform: scale(1.1) rotate(5deg); }
+      100% { opacity: 1; transform: scale(1) rotate(0deg); }
+    }`,
+    slideLeft: `@keyframes sceneMotion {
+      0% { opacity: 0; transform: translateX(300px); }
+      100% { opacity: 1; transform: translateX(0); }
+    }`,
+    slideRight: `@keyframes sceneMotion {
+      0% { opacity: 0; transform: translateX(-300px); }
+      100% { opacity: 1; transform: translateX(0); }
+    }`,
+    pulse: `@keyframes sceneMotion {
+      0% { opacity: 0; transform: scale(0.8); }
+      50% { opacity: 1; transform: scale(1.15); }
+      100% { opacity: 1; transform: scale(1); }
+    }`
+  };
+
+  const safeMotion = motionCSS[motionType] || motionCSS.popIn;
+  const safeLabel = String(labelText || "").replace(/[<>]/g, "");
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { margin: 0; width: 1280px; height: 720px; overflow: hidden; font-family: Arial, sans-serif; }
+  .scene {
+    width: 1280px; height: 720px;
+    background: linear-gradient(135deg, ${primaryColor}, ${secondaryColor});
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    position: relative;
+  }
+  .icon {
+    font-size: 180px;
+    animation: sceneMotion 1.2s ease-out forwards;
+    animation-play-state: paused;
+  }
+  .label {
+    font-size: 42px;
+    color: white;
+    font-weight: bold;
+    margin-top: 30px;
+    text-shadow: 2px 2px 8px rgba(0,0,0,0.5);
+    animation: sceneMotion 1.2s ease-out forwards;
+    animation-delay: 0.2s;
+    animation-play-state: paused;
+  }
+  ${safeMotion}
+  .glow {
+    position: absolute;
+    width: 700px; height: 700px;
+    background: radial-gradient(circle, rgba(255,255,255,0.15), transparent);
+    animation: glowPulse 2s ease-in-out infinite;
+    animation-play-state: paused;
+  }
+  @keyframes glowPulse {
+    0%, 100% { transform: scale(1); opacity: 0.5; }
+    50% { transform: scale(1.3); opacity: 0.8; }
+  }
+</style>
+</head>
+<body>
+  <div class="scene">
+    <div class="glow"></div>
+    <div class="icon">${emoji}</div>
+    <div class="label">${safeLabel}</div>
+  </div>
+  <script>
+    document.getAnimations().forEach(a => a.pause());
+    window.setSceneTime = (ms) => {
+      document.getAnimations().forEach(a => { a.currentTime = ms; });
+    };
+  </script>
+</body>
+</html>`;
+}
+
+async function captureSceneFrames(env, sceneParams, numFrames, frameDurationMs) {
+  const html = buildSceneHtml(sceneParams);
+  const browser = await puppeteer.launch(env.BROWSER);
+  try {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 720 });
+    await page.setContent(html);
+
+    const frames = [];
+    for (let i = 0; i < numFrames; i++) {
+      const timeMs = i * frameDurationMs;
+      await page.evaluate((ms) => { window.setSceneTime(ms); }, timeMs);
+      const screenshot = await page.screenshot({ type: "jpeg", quality: 80 });
+      frames.push(screenshot);
+    }
+    return frames;
+  } finally {
+    await browser.close();
+  }
+}
+
+function cleanImageDescription(desc) {
+  return desc
+    .replace(/\btext\b/gi, "")
+    .replace(/\btitle\b/gi, "")
+    .replace(/\bwords?\b/gi, "")
+    .replace(/\bwriting\b/gi, "")
+    .replace(/\blogo\b/gi, "")
+    .replace(/\bcaption\b/gi, "")
+    .trim();
+}
 
 export default {
   async fetch(request, env, ctx) {
@@ -223,7 +346,7 @@ export default {
 
       for (const opp of topOpportunities.results) {
         let success = false;
-        let generatedTitle, generatedScript, contentPlanId;
+        let generatedTitle, generatedScript, contentPlanId, sceneDescriptions;
 
         for (let attempt = 1; attempt <= 2 && !success; attempt++) {
           try {
@@ -234,7 +357,7 @@ export default {
               ? `\n\nFor context, your recent videos covered: ${recentTitles}. If relevant, you may briefly reference one of these for continuity, but don't force it.`
               : "";
 
-            const prompt = `${PERSONA}\n\nWrite a short, 30-45 second video script (just the spoken narration, no stage directions) about this trending topic: ${cleanTitle}.${memoryNote}\n\nGive your actual opinion - don't just summarize. Also suggest a catchy, clickable video title under 60 characters that reflects your personality. Format your response exactly as:\nTITLE: <title>\nSCRIPT: <script>`;
+            const prompt = `${PERSONA}\n\nWrite a short, 30-45 second video script (just the spoken narration, no stage directions) about this trending topic: ${cleanTitle}.${memoryNote}\n\nGive your actual opinion - don't just summarize. Also suggest a catchy, clickable video title under 60 characters that reflects your personality.\n\nFinally, describe 3 distinct visual scenes representing the subject matter. For each scene, give: a single relevant emoji, and a short 3-5 word label phrase (not the title, never include literal words like "text" or "title"). Format your response exactly as:\nTITLE: <title>\nSCRIPT: <script>\nSCENE1_EMOJI: <emoji>\nSCENE1_LABEL: <short phrase>\nSCENE2_EMOJI: <emoji>\nSCENE2_LABEL: <short phrase>\nSCENE3_EMOJI: <emoji>\nSCENE3_LABEL: <short phrase>`;
 
             const aiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
               messages: [{ role: "user", content: prompt }]
@@ -248,10 +371,22 @@ export default {
             }
 
             const titleMatch = responseText.match(/TITLE:\s*(.+)/i);
-            const scriptMatch = responseText.match(/SCRIPT:\s*([\s\S]+)/i);
+            const scriptMatch = responseText.match(/SCRIPT:\s*([\s\S]+?)(?=SCENE1_EMOJI:|$)/i);
+            const e1 = responseText.match(/SCENE1_EMOJI:\s*(.+)/i);
+            const l1 = responseText.match(/SCENE1_LABEL:\s*(.+)/i);
+            const e2 = responseText.match(/SCENE2_EMOJI:\s*(.+)/i);
+            const l2 = responseText.match(/SCENE2_LABEL:\s*(.+)/i);
+            const e3 = responseText.match(/SCENE3_EMOJI:\s*(.+)/i);
+            const l3 = responseText.match(/SCENE3_LABEL:\s*(.+)/i);
 
             generatedTitle = titleMatch ? titleMatch[1].trim() : cleanTitle;
             generatedScript = scriptMatch ? scriptMatch[1].trim() : responseText.trim();
+
+            sceneDescriptions = [
+              { emoji: e1 ? e1[1].trim().split(" ")[0] : "🎬", label: l1 ? cleanImageDescription(l1[1].trim()) : cleanTitle },
+              { emoji: e2 ? e2[1].trim().split(" ")[0] : "🎬", label: l2 ? cleanImageDescription(l2[1].trim()) : cleanTitle },
+              { emoji: e3 ? e3[1].trim().split(" ")[0] : "🎬", label: l3 ? cleanImageDescription(l3[1].trim()) : cleanTitle }
+            ];
 
             const genSafetyCheck = passesPlatformSafetyGate(generatedTitle + " " + generatedScript);
             if (!genSafetyCheck.passes) {
@@ -265,7 +400,7 @@ export default {
 
             const insertedPlan = await env.ai_ceo_memory.prepare(
               "INSERT INTO content_plans (opportunity_id, title, script, metadata) VALUES (?, ?, ?, ?) RETURNING id"
-            ).bind(opp.id, generatedTitle, generatedScript, JSON.stringify({ style: isCommentary ? "commentary" : "direct", persona: "skeptical_fan" })).first();
+            ).bind(opp.id, generatedTitle, generatedScript, JSON.stringify({ style: isCommentary ? "commentary" : "direct", persona: "skeptical_fan", sceneDescriptions })).first();
 
             contentPlanId = insertedPlan.id;
 
@@ -295,10 +430,10 @@ export default {
           }
 
           const canProceedAudio = await checkAndIncrementDailyLimit(env, "b2_audio_upload");
-          const canProceedImage = await checkAndIncrementDailyLimit(env, "b2_image_upload");
+          const canProceedFrames = await checkAndIncrementDailyLimit(env, "browser_render_scene");
 
-          if (!canProceedAudio || !canProceedImage) {
-            console.log(`Daily B2 operation limit reached, skipping asset generation for content_plan_id=${contentPlanId}`);
+          if (!canProceedAudio || !canProceedFrames) {
+            console.log(`Daily operation limit reached, skipping asset generation for content_plan_id=${contentPlanId}`);
             continue;
           }
 
@@ -314,41 +449,43 @@ export default {
           const downloadUrlBase = authData.apiInfo.storageApi.downloadUrl;
           const authToken = authData.authorizationToken;
 
-          const STYLE_GUIDE = "vibrant colors, bold contrast, dynamic angle, energetic YouTube thumbnail style, consistent visual branding";
-          const imagePrompts = [
-            `${generatedTitle}, wide establishing shot, ${STYLE_GUIDE}`,
-            `${generatedTitle}, close-up dramatic detail, ${STYLE_GUIDE}`,
-            `${generatedTitle}, reaction-style dynamic composition, ${STYLE_GUIDE}`
-          ];
+          console.log(`Capturing animated frames for content_plan_id=${contentPlanId}...`);
 
-          const imageUrls = [];
-          for (let imgIdx = 0; imgIdx < imagePrompts.length; imgIdx++) {
-            const imgResp = await env.AI.run("@cf/black-forest-labs/flux-1-schnell", {
-              prompt: imagePrompts[imgIdx]
-            });
-            const imageBinaryString = atob(imgResp.image);
-            const imgBytes = Uint8Array.from(imageBinaryString, (m) => m.codePointAt(0));
+          const sceneFrameUrls = [];
+          for (let sceneIdx = 0; sceneIdx < sceneDescriptions.length; sceneIdx++) {
+            const colorPair = COLOR_PAIRS[(contentPlanId + sceneIdx) % COLOR_PAIRS.length];
+            const motionType = MOTION_TYPES[(contentPlanId + sceneIdx) % MOTION_TYPES.length];
 
-            const uploadUrlDataImg = await b2GetUploadUrl(apiUrl, authToken, env.B2_BUCKET_ID);
-            const imageFileName = `images/content_plan_${contentPlanId}_${imgIdx}.jpg`;
-            await b2UploadFile(uploadUrlDataImg.uploadUrl, uploadUrlDataImg.authorizationToken, imageFileName, imgBytes, "image/jpeg");
+            const frames = await captureSceneFrames(env, {
+              emoji: sceneDescriptions[sceneIdx].emoji,
+              primaryColor: colorPair[0],
+              secondaryColor: colorPair[1],
+              motionType: motionType,
+              labelText: sceneDescriptions[sceneIdx].label
+            }, 8, 150);
 
-            const imgDownloadUrl = `${downloadUrlBase}/file/ai-ceo-media/${imageFileName}?Authorization=${authToken}`;
-            imageUrls.push(imgDownloadUrl);
+            const frameUrls = [];
+            for (let frameIdx = 0; frameIdx < frames.length; frameIdx++) {
+              const uploadUrlData = await b2GetUploadUrl(apiUrl, authToken, env.B2_BUCKET_ID);
+              const frameFileName = `frames/content_plan_${contentPlanId}_scene${sceneIdx}_frame${frameIdx}.jpg`;
+              await b2UploadFile(uploadUrlData.uploadUrl, uploadUrlData.authorizationToken, frameFileName, new Uint8Array(frames[frameIdx]), "image/jpeg");
+              frameUrls.push(`${downloadUrlBase}/file/ai-ceo-media/${frameFileName}?Authorization=${authToken}`);
+            }
+            sceneFrameUrls.push(frameUrls);
           }
 
           const uploadUrlData = await b2GetUploadUrl(apiUrl, authToken, env.B2_BUCKET_ID);
           const audioFileName = `audio/content_plan_${contentPlanId}.mp3`;
           await b2UploadFile(uploadUrlData.uploadUrl, uploadUrlData.authorizationToken, audioFileName, audioBytes, "audio/mpeg");
 
-          console.log(`Video assets uploaded for content_plan_id=${contentPlanId}: ${audioFileName}, ${imageUrls.length} images`);
+          console.log(`Video assets uploaded for content_plan_id=${contentPlanId}: ${audioFileName}, ${sceneFrameUrls.length} scenes x ${sceneFrameUrls[0]?.length || 0} frames`);
 
           const audioDownloadUrl = `${downloadUrlBase}/file/ai-ceo-media/${audioFileName}?Authorization=${authToken}`;
           const finalVideoFileName = `videos/content_plan_${contentPlanId}.mp4`;
 
-          console.log(`Calling Render to assemble video for content_plan_id=${contentPlanId} (with retry for cold start)...`);
+          console.log(`Calling Render to assemble video from frame sequences for content_plan_id=${contentPlanId}...`);
           const assembleResult = await callRenderAssembler({
-            imageUrls: imageUrls,
+            sceneFrameUrls: sceneFrameUrls,
             audioUrl: audioDownloadUrl,
             b2KeyId: env.B2_KEY_ID,
             b2ApplicationKey: env.B2_APPLICATION_KEY,
