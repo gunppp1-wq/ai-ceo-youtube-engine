@@ -11,7 +11,7 @@ async function b2GetUploadUrl(apiUrl, authToken, bucketId) {
   const res = await fetch(`${apiUrl}/b2api/v3/b2_get_upload_url?bucketId=${bucketId}`, {
     headers: { "Authorization": authToken }
   });
-  if (!res.ok) throw new Error(`B2 get upload URL failed: ${res.status}`);
+  if (!res.ok) { const errBody = await res.text(); throw new Error(`B2 get upload URL failed: ${res.status} ${errBody}`); }
   return await res.json();
 }
 
@@ -309,6 +309,11 @@ export default {
           const audioArrayBuffer = await ttsResp.arrayBuffer();
           const audioBytes = new Uint8Array(audioArrayBuffer);
 
+          const authData = await b2Authorize(env);
+          const apiUrl = authData.apiInfo.storageApi.apiUrl;
+          const downloadUrlBase = authData.apiInfo.storageApi.downloadUrl;
+          const authToken = authData.authorizationToken;
+
           const STYLE_GUIDE = "vibrant colors, bold contrast, dynamic angle, energetic YouTube thumbnail style, consistent visual branding";
           const imagePrompts = [
             `${generatedTitle}, wide establishing shot, ${STYLE_GUIDE}`,
@@ -324,28 +329,21 @@ export default {
             const imageBinaryString = atob(imgResp.image);
             const imgBytes = Uint8Array.from(imageBinaryString, (m) => m.codePointAt(0));
 
-            const authDataImg = await b2Authorize(env);
-            const apiUrlImg = authDataImg.apiInfo.storageApi.apiUrl;
-            const uploadUrlDataImg = await b2GetUploadUrl(apiUrlImg, authDataImg.authorizationToken, env.B2_BUCKET_ID);
+            const uploadUrlDataImg = await b2GetUploadUrl(apiUrl, authToken, env.B2_BUCKET_ID);
             const imageFileName = `images/content_plan_${contentPlanId}_${imgIdx}.jpg`;
             await b2UploadFile(uploadUrlDataImg.uploadUrl, uploadUrlDataImg.authorizationToken, imageFileName, imgBytes, "image/jpeg");
 
-            const imgDownloadUrl = `${authDataImg.apiInfo.storageApi.downloadUrl}/file/ai-ceo-media/${imageFileName}?Authorization=${authDataImg.authorizationToken}`;
+            const imgDownloadUrl = `${downloadUrlBase}/file/ai-ceo-media/${imageFileName}?Authorization=${authToken}`;
             imageUrls.push(imgDownloadUrl);
           }
 
-          const authData = await b2Authorize(env);
-          const apiUrl = authData.apiInfo.storageApi.apiUrl;
-          const downloadUrlBase = authData.apiInfo.storageApi.downloadUrl;
-          const uploadUrlData = await b2GetUploadUrl(apiUrl, authData.authorizationToken, env.B2_BUCKET_ID);
-
+          const uploadUrlData = await b2GetUploadUrl(apiUrl, authToken, env.B2_BUCKET_ID);
           const audioFileName = `audio/content_plan_${contentPlanId}.mp3`;
-
           await b2UploadFile(uploadUrlData.uploadUrl, uploadUrlData.authorizationToken, audioFileName, audioBytes, "audio/mpeg");
 
           console.log(`Video assets uploaded for content_plan_id=${contentPlanId}: ${audioFileName}, ${imageUrls.length} images`);
 
-          const audioDownloadUrl = `${downloadUrlBase}/file/ai-ceo-media/${audioFileName}?Authorization=${authData.authorizationToken}`;
+          const audioDownloadUrl = `${downloadUrlBase}/file/ai-ceo-media/${audioFileName}?Authorization=${authToken}`;
           const finalVideoFileName = `videos/content_plan_${contentPlanId}.mp4`;
 
           console.log(`Calling Render to assemble video for content_plan_id=${contentPlanId} (with retry for cold start)...`);
