@@ -337,6 +337,40 @@ async function getOwnChannelId(accessToken) {
   return data.items[0].id;
 }
 
+async function collectCompetitorInsights(env, query) {
+  const searchUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&order=viewCount&maxResults=10&q=${encodeURIComponent(query)}&key=${env.YOUTUBE_API_KEY}`;
+  const searchRes = await fetch(searchUrl);
+  const searchData = await searchRes.json();
+
+  if (!searchData.items || searchData.items.length === 0) {
+    console.log(`No competitor videos found for query: ${query}`);
+    return [];
+  }
+
+  const videoIds = searchData.items.map(item => item.id.videoId).filter(Boolean).join(",");
+  if (!videoIds) return [];
+
+  const statsUrl = `https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics&id=${videoIds}&key=${env.YOUTUBE_API_KEY}`;
+  const statsRes = await fetch(statsUrl);
+  const statsData = await statsRes.json();
+
+  if (!statsData.items) return [];
+
+  const insights = statsData.items.map(item => ({
+    title: item.snippet.title,
+    channelTitle: item.snippet.channelTitle,
+    viewCount: parseInt(item.statistics.viewCount || "0", 10)
+  }));
+
+  for (const insight of insights) {
+    await env.ai_ceo_memory.prepare(
+      "INSERT INTO competitor_insights (query, video_title, view_count, channel_title) VALUES (?, ?, ?, ?)"
+    ).bind(query, insight.title, insight.viewCount, insight.channelTitle).run();
+  }
+
+  return insights;
+}
+
 async function getNextRotationHour(env) {
   for (let h = 0; h < 24; h++) {
     const row = await env.ai_ceo_memory.prepare(
@@ -729,6 +763,27 @@ export default {
 
   async scheduled(event, env, ctx) {
     try {
+      const today = new Date().toISOString().slice(0, 10);
+      const competitorCheckDone = await env.ai_ceo_memory.prepare(
+        "SELECT count FROM daily_usage WHERE usage_date = ? AND op_type = ?"
+      ).bind(today, "competitor_check").first();
+
+      if (!competitorCheckDone) {
+        try {
+          console.log("Running daily competitor insights collection...");
+          const competitorQueries = ["movie trailer reaction commentary", "gaming news commentary", "music video reaction"];
+          for (const query of competitorQueries) {
+            const insights = await collectCompetitorInsights(env, query);
+            console.log(`Collected ${insights.length} competitor insights for query: ${query}`);
+          }
+          await env.ai_ceo_memory.prepare(
+            "INSERT INTO daily_usage (usage_date, op_type, count) VALUES (?, ?, 1)"
+          ).bind(today, "competitor_check").run();
+        } catch (competitorErr) {
+          console.log("Non-fatal: competitor insights collection failed:", competitorErr.message);
+        }
+      }
+
       const channelSetupDone = await env.ai_ceo_memory.prepare(
         "SELECT id FROM channel_setup LIMIT 1"
       ).first();
@@ -869,6 +924,11 @@ export default {
       ).all();
       const recentTitles = recentPlans.results.map(p => p.title).join(", ");
 
+      const topCompetitorTitles = await env.ai_ceo_memory.prepare(
+        "SELECT video_title FROM competitor_insights ORDER BY view_count DESC LIMIT 5"
+      ).all();
+      const competitorTitleExamples = topCompetitorTitles.results.map(r => r.video_title).join(", ");
+
       for (const opp of topOpportunities.results) {
         let success = false;
         let generatedTitle, generatedScript, contentPlanId, sceneDescriptions, thumbnailDescription;
@@ -882,7 +942,11 @@ export default {
               ? `\n\nFor context, your recent videos covered: ${recentTitles}. If relevant, you may briefly reference one of these for continuity, but don't force it.`
               : "";
 
-            const prompt = `${PERSONA}\n\nWrite a 20-25 second video script (just the spoken narration, no stage directions) about this trending topic: ${cleanTitle}.${memoryNote}\n\nWrite this in a natural, conversational tone with appropriate punctuation for text-to-speech - use contractions, vary your rhythm, and write the way someone would actually speak out loud, not like formal writing.\n\nStructure your script in three parts:\n1. HOOK (first 1-2 sentences): State what this is about, then immediately contrast it with what people usually assume - create a "wait, really?" moment that makes them want to keep watching\n2. BODY: Build real tension - raise a question or a stake, delay your full answer for a beat, then deliver your actual take with conviction\n3. OUTRO (final 1-2 sentences): A clear payoff or takeaway - leave the viewer with your real opinion stated plainly, don't just trail off\n\nWriting style for text-to-speech: write the way you'd actually talk, not like an essay. Use short sentences. Use natural punctuation - commas, periods, dashes - to create pauses where you'd naturally pause speaking. Vary your sentence length: mix short punchy lines with slightly longer ones, the way real speech actually flows.\n\nAlso suggest a catchy, clickable video title under 60 characters that reflects your personality.\n\nFinally, describe 3 distinct visual scenes representing the subject matter, plus one SEPARATE thumbnail concept. For each scene, give: a single relevant emoji, and a short 3-5 word label phrase (not the title, never include literal words like "text" or "title"). For the thumbnail specifically, choose the single most dramatic, attention-grabbing emoji and phrase that captures the core hook of the video - this is what people see before clicking. Format your response exactly as:\nTITLE: <title>\nSCRIPT: <script>\nSCENE1_EMOJI: <emoji>\nSCENE1_LABEL: <short phrase>\nSCENE2_EMOJI: <emoji>\nSCENE2_LABEL: <short phrase>\nSCENE3_EMOJI: <emoji>\nSCENE3_LABEL: <short phrase>\nTHUMBNAIL_EMOJI: <emoji>\nTHUMBNAIL_LABEL: <short dramatic phrase>`;
+            const competitorNote = competitorTitleExamples
+              ? `\n\nFor reference, here are some currently high-performing video titles from similar commentary channels: ${competitorTitleExamples}. Use these only to understand what title styles and angles are resonating right now - do not copy them, write something original in your own voice.`
+              : "";
+
+            const prompt = `${PERSONA}\n\nWrite a 20-25 second video script (just the spoken narration, no stage directions) about this trending topic: ${cleanTitle}.${memoryNote}${competitorNote}\n\nWrite this in a natural, conversational tone with appropriate punctuation for text-to-speech - use contractions, vary your rhythm, and write the way someone would actually speak out loud, not like formal writing.\n\nStructure your script in three parts:\n1. HOOK (first 1-2 sentences): State what this is about, then immediately contrast it with what people usually assume - create a "wait, really?" moment that makes them want to keep watching\n2. BODY: Build real tension - raise a question or a stake, delay your full answer for a beat, then deliver your actual take with conviction\n3. OUTRO (final 1-2 sentences): A clear payoff or takeaway - leave the viewer with your real opinion stated plainly, don't just trail off\n\nWriting style for text-to-speech: write the way you'd actually talk, not like an essay. Use short sentences. Use natural punctuation - commas, periods, dashes - to create pauses where you'd naturally pause speaking. Vary your sentence length: mix short punchy lines with slightly longer ones, the way real speech actually flows.\n\nAlso suggest a catchy, clickable video title under 60 characters that reflects your personality.\n\nFinally, describe 3 distinct visual scenes representing the subject matter, plus one SEPARATE thumbnail concept. For each scene, give: a single relevant emoji, and a short 3-5 word label phrase (not the title, never include literal words like "text" or "title"). For the thumbnail specifically, choose the single most dramatic, attention-grabbing emoji and phrase that captures the core hook of the video - this is what people see before clicking. Format your response exactly as:\nTITLE: <title>\nSCRIPT: <script>\nSCENE1_EMOJI: <emoji>\nSCENE1_LABEL: <short phrase>\nSCENE2_EMOJI: <emoji>\nSCENE2_LABEL: <short phrase>\nSCENE3_EMOJI: <emoji>\nSCENE3_LABEL: <short phrase>\nTHUMBNAIL_EMOJI: <emoji>\nTHUMBNAIL_LABEL: <short dramatic phrase>`;
 
             const aiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
               messages: [{ role: "user", content: prompt }]
@@ -1271,6 +1335,11 @@ export default {
     }
   }
 };
+
+
+
+
+
 
 
 
