@@ -325,6 +325,24 @@ async function applyChannelBranding(accessToken, channelId, title, description, 
   return await res.json();
 }
 
+async function getChannelStats(accessToken) {
+  const res = await fetch("https://www.googleapis.com/youtube/v3/channels?part=statistics&mine=true", {
+    headers: { Authorization: `Bearer ${accessToken}` }
+  });
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Get channel stats failed: ${res.status} ${errBody}`);
+  }
+  const data = await res.json();
+  if (!data.items || !data.items[0]) throw new Error("No channel found for stats");
+  const stats = data.items[0].statistics;
+  return {
+    subscriberCount: parseInt(stats.subscriberCount || "0", 10),
+    viewCount: parseInt(stats.viewCount || "0", 10),
+    videoCount: parseInt(stats.videoCount || "0", 10)
+  };
+}
+
 async function getOwnChannelId(accessToken) {
   const res = await fetch("https://www.googleapis.com/youtube/v3/channels?part=id&mine=true", {
     headers: { "Authorization": `Bearer ${accessToken}` }
@@ -1386,12 +1404,37 @@ export default {
         }
       }
 
+      try {
+        const statsCheckDone = await env.ai_ceo_memory.prepare(
+          "SELECT count FROM daily_usage WHERE usage_date = ? AND op_type = ?"
+        ).bind(today, "channel_stats_check").first();
+
+        if (!statsCheckDone) {
+          const statsAccessToken = await getYoutubeAccessToken(env);
+          const channelStats = await getChannelStats(statsAccessToken);
+
+          await env.ai_ceo_memory.prepare(
+            "INSERT INTO channel_stats (subscriber_count, view_count, video_count) VALUES (?, ?, ?)"
+          ).bind(channelStats.subscriberCount, channelStats.viewCount, channelStats.videoCount).run();
+
+          await env.ai_ceo_memory.prepare(
+            "INSERT INTO daily_usage (usage_date, op_type, count) VALUES (?, ?, 1)"
+          ).bind(today, "channel_stats_check").run();
+
+          console.log(`Channel stats recorded: ${channelStats.subscriberCount} subscribers, ${channelStats.viewCount} views, ${channelStats.videoCount} videos`);
+        }
+      } catch (statsErr) {
+        console.log("Non-fatal: channel stats fetch failed:", statsErr.message);
+      }
+
       console.log("scheduled() completed successfully");
     } catch (outerErr) {
       console.log("FATAL ERROR in scheduled():", outerErr.message, outerErr.stack);
     }
   }
 };
+
+
 
 
 
