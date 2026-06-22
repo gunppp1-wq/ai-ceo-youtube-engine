@@ -64,6 +64,96 @@ async function callRenderAssembler(payload) {
   }
 }
 
+async function getYoutubeAccessToken(env) {
+  const params = new URLSearchParams({
+    client_id: env.GOOGLE_CLIENT_ID,
+    client_secret: env.GOOGLE_CLIENT_SECRET,
+    refresh_token: env.YOUTUBE_REFRESH_TOKEN,
+    grant_type: "refresh_token"
+  });
+
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: params.toString()
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`YouTube token refresh failed: ${res.status} ${errBody}`);
+  }
+
+  const data = await res.json();
+  return data.access_token;
+}
+
+async function uploadVideoToYoutube(accessToken, videoBytes, title, description) {
+  const metadata = {
+    snippet: {
+      title: title.slice(0, 100),
+      description: description.slice(0, 5000),
+      categoryId: "24"
+    },
+    status: {
+      privacyStatus: "public",
+      selfDeclaredMadeForKids: false
+    }
+  };
+
+  const initRes = await fetch("https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+      "X-Upload-Content-Type": "video/mp4",
+      "X-Upload-Content-Length": String(videoBytes.length)
+    },
+    body: JSON.stringify(metadata)
+  });
+
+  if (!initRes.ok) {
+    const errBody = await initRes.text();
+    throw new Error(`YouTube upload session init failed: ${initRes.status} ${errBody}`);
+  }
+
+  const uploadUrl = initRes.headers.get("Location");
+  if (!uploadUrl) throw new Error("YouTube upload session init did not return a Location header");
+
+  const uploadRes = await fetch(uploadUrl, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "video/mp4",
+      "Content-Length": String(videoBytes.length)
+    },
+    body: videoBytes
+  });
+
+  if (!uploadRes.ok) {
+    const errBody = await uploadRes.text();
+    throw new Error(`YouTube video upload failed: ${uploadRes.status} ${errBody}`);
+  }
+
+  return await uploadRes.json();
+}
+
+async function setYoutubeThumbnail(accessToken, videoId, thumbnailBytes) {
+  const res = await fetch(`https://www.googleapis.com/upload/youtube/v3/thumbnails/set?videoId=${videoId}`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${accessToken}`,
+      "Content-Type": "image/jpeg"
+    },
+    body: thumbnailBytes
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`YouTube thumbnail set failed: ${res.status} ${errBody}`);
+  }
+
+  return await res.json();
+}
+
 const DAILY_B2_OP_LIMIT = 30;
 
 async function checkAndIncrementDailyLimit(env, opType) {
@@ -339,7 +429,7 @@ export default {
 
       for (const opp of topOpportunities.results) {
         let success = false;
-        let generatedTitle, generatedScript, contentPlanId, sceneDescriptions;
+        let generatedTitle, generatedScript, contentPlanId, sceneDescriptions, thumbnailDescription;
 
         for (let attempt = 1; attempt <= 2 && !success; attempt++) {
           try {
@@ -350,7 +440,7 @@ export default {
               ? `\n\nFor context, your recent videos covered: ${recentTitles}. If relevant, you may briefly reference one of these for continuity, but don't force it.`
               : "";
 
-            const prompt = `${PERSONA}\n\nWrite a 30-45 second video script (just the spoken narration, no stage directions) about this trending topic: ${cleanTitle}.${memoryNote}\n\nStructure your script in three parts:\n1. HOOK (first 1-2 sentences): State what this is about, then immediately contrast it with what people usually assume - create a "wait, really?" moment that makes them want to keep watching\n2. BODY: Build real tension - raise a question or a stake, delay your full answer for a beat, then deliver your actual take with conviction\n3. OUTRO (final 1-2 sentences): A clear payoff or takeaway - leave the viewer with your real opinion stated plainly, don't just trail off\n\nWriting style for text-to-speech: write the way you'd actually talk, not like an essay. Use short sentences. Use natural punctuation - commas, periods, dashes - to create pauses where you'd naturally pause speaking. Vary your sentence length: mix short punchy lines with slightly longer ones, the way real speech actually flows.\n\nAlso suggest a catchy, clickable video title under 60 characters that reflects your personality.\n\nFinally, describe 3 distinct visual scenes representing the subject matter. For each scene, give: a single relevant emoji, and a short 3-5 word label phrase (not the title, never include literal words like "text" or "title"). Format your response exactly as:\nTITLE: <title>\nSCRIPT: <script>\nSCENE1_EMOJI: <emoji>\nSCENE1_LABEL: <short phrase>\nSCENE2_EMOJI: <emoji>\nSCENE2_LABEL: <short phrase>\nSCENE3_EMOJI: <emoji>\nSCENE3_LABEL: <short phrase>`;
+            const prompt = `${PERSONA}\n\nWrite a 30-45 second video script (just the spoken narration, no stage directions) about this trending topic: ${cleanTitle}.${memoryNote}\n\nStructure your script in three parts:\n1. HOOK (first 1-2 sentences): State what this is about, then immediately contrast it with what people usually assume - create a "wait, really?" moment that makes them want to keep watching\n2. BODY: Build real tension - raise a question or a stake, delay your full answer for a beat, then deliver your actual take with conviction\n3. OUTRO (final 1-2 sentences): A clear payoff or takeaway - leave the viewer with your real opinion stated plainly, don't just trail off\n\nWriting style for text-to-speech: write the way you'd actually talk, not like an essay. Use short sentences. Use natural punctuation - commas, periods, dashes - to create pauses where you'd naturally pause speaking. Vary your sentence length: mix short punchy lines with slightly longer ones, the way real speech actually flows.\n\nAlso suggest a catchy, clickable video title under 60 characters that reflects your personality.\n\nFinally, describe 3 distinct visual scenes representing the subject matter, plus one SEPARATE thumbnail concept. For each scene, give: a single relevant emoji, and a short 3-5 word label phrase (not the title, never include literal words like "text" or "title"). For the thumbnail specifically, choose the single most dramatic, attention-grabbing emoji and phrase that captures the core hook of the video - this is what people see before clicking. Format your response exactly as:\nTITLE: <title>\nSCRIPT: <script>\nSCENE1_EMOJI: <emoji>\nSCENE1_LABEL: <short phrase>\nSCENE2_EMOJI: <emoji>\nSCENE2_LABEL: <short phrase>\nSCENE3_EMOJI: <emoji>\nSCENE3_LABEL: <short phrase>\nTHUMBNAIL_EMOJI: <emoji>\nTHUMBNAIL_LABEL: <short dramatic phrase>`;
 
             const aiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
               messages: [{ role: "user", content: prompt }]
@@ -371,6 +461,8 @@ export default {
             const l2 = responseText.match(/SCENE2_LABEL:\s*(.+)/i);
             const e3 = responseText.match(/SCENE3_EMOJI:\s*(.+)/i);
             const l3 = responseText.match(/SCENE3_LABEL:\s*(.+)/i);
+            const te = responseText.match(/THUMBNAIL_EMOJI:\s*(.+)/i);
+            const tl = responseText.match(/THUMBNAIL_LABEL:\s*(.+)/i);
 
             generatedTitle = titleMatch ? titleMatch[1].trim() : cleanTitle;
             generatedScript = scriptMatch ? scriptMatch[1].trim() : responseText.trim();
@@ -380,6 +472,11 @@ export default {
               { emoji: e2 ? e2[1].trim().split(" ")[0] : "🎬", label: l2 ? cleanImageDescription(l2[1].trim()) : cleanTitle },
               { emoji: e3 ? e3[1].trim().split(" ")[0] : "🎬", label: l3 ? cleanImageDescription(l3[1].trim()) : cleanTitle }
             ];
+
+            thumbnailDescription = {
+              emoji: te ? te[1].trim().split(" ")[0] : "🔥",
+              label: tl ? cleanImageDescription(tl[1].trim()) : cleanTitle
+            };
 
             const genSafetyCheck = passesPlatformSafetyGate(generatedTitle + " " + generatedScript);
             if (!genSafetyCheck.passes) {
@@ -393,7 +490,7 @@ export default {
 
             const insertedPlan = await env.ai_ceo_memory.prepare(
               "INSERT INTO content_plans (opportunity_id, title, script, metadata) VALUES (?, ?, ?, ?) RETURNING id"
-            ).bind(opp.id, generatedTitle, generatedScript, JSON.stringify({ style: isCommentary ? "commentary" : "direct", persona: "skeptical_fan", sceneDescriptions })).first();
+            ).bind(opp.id, generatedTitle, generatedScript, JSON.stringify({ style: isCommentary ? "commentary" : "direct", persona: "skeptical_fan", sceneDescriptions, thumbnailDescription })).first();
 
             contentPlanId = insertedPlan.id;
 
@@ -424,8 +521,9 @@ export default {
 
           const canProceedAudio = await checkAndIncrementDailyLimit(env, "b2_audio_upload");
           const canProceedFrames = await checkAndIncrementDailyLimit(env, "browser_render_scene");
+          const canProceedThumbnail = await checkAndIncrementDailyLimit(env, "thumbnail_generation");
 
-          if (!canProceedAudio || !canProceedFrames) {
+          if (!canProceedAudio || !canProceedFrames || !canProceedThumbnail) {
             console.log(`Daily operation limit reached, skipping asset generation for content_plan_id=${contentPlanId}`);
             continue;
           }
@@ -475,6 +573,20 @@ export default {
             await browser.close();
           }
 
+          console.log(`Generating dedicated thumbnail for content_plan_id=${contentPlanId}...`);
+          const thumbnailPrompt = `${thumbnailDescription.label}, dramatic high-contrast lighting, single clear focal point, rule of thirds composition, vibrant saturated colors, professional photography style, eye-catching`;
+          const thumbResp = await env.AI.run("@cf/black-forest-labs/flux-1-schnell", {
+            prompt: thumbnailPrompt
+          });
+          const thumbBinaryString = atob(thumbResp.image);
+          const thumbBytes = Uint8Array.from(thumbBinaryString, (m) => m.codePointAt(0));
+
+          const thumbUploadUrlData = await b2GetUploadUrl(apiUrl, authToken, env.B2_BUCKET_ID);
+          const thumbnailFileName = `thumbnails/content_plan_${contentPlanId}_thumb.jpg`;
+          await b2UploadFile(thumbUploadUrlData.uploadUrl, thumbUploadUrlData.authorizationToken, thumbnailFileName, thumbBytes, "image/jpeg");
+          const thumbnailDownloadUrl = `${downloadUrlBase}/file/ai-ceo-media/${thumbnailFileName}?Authorization=${authToken}`;
+          console.log(`Thumbnail generated and uploaded: ${thumbnailFileName}`);
+
           const uploadUrlData = await b2GetUploadUrl(apiUrl, authToken, env.B2_BUCKET_ID);
           const audioFileName = `audio/content_plan_${contentPlanId}.mp3`;
           await b2UploadFile(uploadUrlData.uploadUrl, uploadUrlData.authorizationToken, audioFileName, audioBytes, "audio/mpeg");
@@ -495,12 +607,74 @@ export default {
           });
 
           await env.ai_ceo_memory.prepare(
-            "INSERT INTO videos (content_plan_id, status) VALUES (?, ?)"
-          ).bind(contentPlanId, "video_ready").run();
+            "INSERT INTO videos (content_plan_id, status, thumbnail_url, video_file_name) VALUES (?, ?, ?, ?)"
+          ).bind(contentPlanId, "video_ready", thumbnailDownloadUrl, finalVideoFileName).run();
 
           console.log(`Video fully assembled for content_plan_id=${contentPlanId}: ${finalVideoFileName} (fileId: ${assembleResult.fileId})`);
         } catch (videoErr) {
           console.log(`ERROR generating/uploading video assets for content_plan_id=${contentPlanId}:`, videoErr.message);
+        }
+      }
+
+      const videosToPublish = await env.ai_ceo_memory.prepare(
+        "SELECT * FROM videos WHERE status = 'video_ready' ORDER BY id ASC LIMIT 1"
+      ).all();
+
+      for (const video of videosToPublish.results) {
+        try {
+          const canProceedUpload = await checkAndIncrementDailyLimit(env, "youtube_upload");
+          if (!canProceedUpload) {
+            console.log(`Daily upload limit reached, skipping publish for video id=${video.id}`);
+            continue;
+          }
+
+          const plan = await env.ai_ceo_memory.prepare(
+            "SELECT title, script FROM content_plans WHERE id = ?"
+          ).bind(video.content_plan_id).first();
+
+          if (!plan) {
+            console.log(`No content_plan found for video id=${video.id}, content_plan_id=${video.content_plan_id}`);
+            continue;
+          }
+
+          console.log(`Publishing video id=${video.id} (content_plan_id=${video.content_plan_id}) to YouTube...`);
+
+          const accessToken = await getYoutubeAccessToken(env);
+
+          const publishAuthData = await b2Authorize(env);
+          const publishDownloadBase = publishAuthData.apiInfo.storageApi.downloadUrl;
+          const publishAuthToken = publishAuthData.authorizationToken;
+
+          const videoDownloadUrl = `${publishDownloadBase}/file/ai-ceo-media/${video.video_file_name}?Authorization=${publishAuthToken}`;
+          const videoFileRes = await fetch(videoDownloadUrl);
+          if (!videoFileRes.ok) throw new Error(`Failed to download video file from B2: ${videoFileRes.status}`);
+          const videoBytes = new Uint8Array(await videoFileRes.arrayBuffer());
+
+          const uploadResult = await uploadVideoToYoutube(accessToken, videoBytes, plan.title, plan.script);
+          const youtubeVideoId = uploadResult.id;
+
+          console.log(`Video uploaded to YouTube: videoId=${youtubeVideoId}`);
+
+          if (video.thumbnail_url) {
+            try {
+              const thumbFileRes = await fetch(video.thumbnail_url);
+              if (thumbFileRes.ok) {
+                const thumbnailBytes = new Uint8Array(await thumbFileRes.arrayBuffer());
+                await setYoutubeThumbnail(accessToken, youtubeVideoId, thumbnailBytes);
+                console.log(`Thumbnail set for videoId=${youtubeVideoId}`);
+              }
+            } catch (thumbErr) {
+              console.log(`Non-fatal: failed to set thumbnail for videoId=${youtubeVideoId}:`, thumbErr.message);
+            }
+          }
+
+          await env.ai_ceo_memory.prepare(
+            "UPDATE videos SET status = ?, youtube_video_id = ?, published_at = datetime('now') WHERE id = ?"
+          ).bind("published", youtubeVideoId, video.id).run();
+
+          console.log(`Video id=${video.id} marked as published with youtube_video_id=${youtubeVideoId}`);
+        } catch (publishErr) {
+          console.log(`ERROR publishing video id=${video.id}:`, publishErr.message);
         }
       }
 
@@ -510,3 +684,16 @@ export default {
     }
   }
 };
+
+
+
+
+
+
+
+
+
+
+
+
+

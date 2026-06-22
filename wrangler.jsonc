@@ -16,7 +16,14 @@
   "browser": {
     "binding": "BROWSER"
   },
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true
+    }
+  },
   "triggers": {
     "crons": ["0 * * * *"]
   }
 }
+
