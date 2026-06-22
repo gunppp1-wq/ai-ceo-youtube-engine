@@ -428,6 +428,63 @@ const COLOR_PAIRS = [
   ["#3a1c71", "#d76d77"]
 ];
 
+function buildImageSceneHtml({ imageBase64, motionType, labelText }) {
+  const motionCSS = {
+    popIn: `@keyframes sceneZoom {
+      0% { transform: scale(1.0); }
+      100% { transform: scale(1.15); }
+    }`,
+    slideLeft: `@keyframes sceneZoom {
+      0% { transform: scale(1.1) translateX(0); }
+      100% { transform: scale(1.1) translateX(-3%); }
+    }`,
+    slideRight: `@keyframes sceneZoom {
+      0% { transform: scale(1.1) translateX(0); }
+      100% { transform: scale(1.1) translateX(3%); }
+    }`,
+    pulse: `@keyframes sceneZoom {
+      0% { transform: scale(1.05); }
+      50% { transform: scale(1.15); }
+      100% { transform: scale(1.05); }
+    }`
+  };
+
+  const safeMotion = motionCSS[motionType] || motionCSS.popIn;
+  const safeLabel = String(labelText || "").replace(/[<>]/g, "");
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { margin: 0; width: 1280px; height: 720px; overflow: hidden; font-family: Arial, sans-serif; }
+  .scene { width: 1280px; height: 720px; position: relative; overflow: hidden; background: #000; }
+  .bgimg {
+    position: absolute; top: 0; left: 0; width: 1280px; height: 720px;
+    background-image: url(data:image/jpeg;base64,${imageBase64});
+    background-size: cover; background-position: center;
+    animation: sceneZoom 6s ease-in-out forwards;
+    animation-play-state: paused;
+  }
+  ${safeMotion}
+  .overlay { position: absolute; bottom: 0; left: 0; width: 100%; padding: 40px; background: linear-gradient(transparent, rgba(0,0,0,0.7)); }
+  .label { font-size: 36px; color: white; font-weight: bold; text-shadow: 2px 2px 6px rgba(0,0,0,0.8); }
+</style>
+</head>
+<body>
+  <div class="scene">
+    <div class="bgimg"></div>
+    <div class="overlay"><div class="label">${safeLabel}</div></div>
+  </div>
+  <script>
+    document.getAnimations().forEach(a => a.pause());
+    window.setSceneTime = (ms) => {
+      document.getAnimations().forEach(a => { a.currentTime = ms; });
+    };
+  </script>
+</body>
+</html>`;
+}
+
 function buildSceneHtml({ emoji, primaryColor, secondaryColor, motionType, labelText }) {
   const motionCSS = {
     popIn: `@keyframes sceneMotion {
@@ -507,6 +564,20 @@ function buildSceneHtml({ emoji, primaryColor, secondaryColor, motionType, label
   </script>
 </body>
 </html>`;
+}
+
+async function captureImageSceneFrames(page, sceneParams, numFrames, frameDurationMs) {
+  const html = buildImageSceneHtml(sceneParams);
+  await page.setContent(html);
+
+  const frames = [];
+  for (let i = 0; i < numFrames; i++) {
+    const timeMs = i * frameDurationMs;
+    await page.evaluate((ms) => { window.setSceneTime(ms); }, timeMs);
+    const screenshot = await page.screenshot({ type: "jpeg", quality: 80 });
+    frames.push(screenshot);
+  }
+  return frames;
 }
 
 async function captureSceneFrames(page, sceneParams, numFrames, frameDurationMs) {
@@ -859,16 +930,43 @@ export default {
           const sceneFrameUrls = [];
           try {
             for (let sceneIdx = 0; sceneIdx < sceneDescriptions.length; sceneIdx++) {
-              const colorPair = COLOR_PAIRS[(contentPlanId + sceneIdx) % COLOR_PAIRS.length];
               const motionType = MOTION_TYPES[(contentPlanId + sceneIdx) % MOTION_TYPES.length];
 
-              const frames = await captureSceneFrames(page, {
-                emoji: sceneDescriptions[sceneIdx].emoji,
-                primaryColor: colorPair[0],
-                secondaryColor: colorPair[1],
-                motionType: motionType,
-                labelText: sceneDescriptions[sceneIdx].label
-              }, 6, 150);
+              const canProceedSceneImage = await checkNeuronBudget(env, "image_generation");
+              let frames;
+              if (canProceedSceneImage) {
+                try {
+                  const sceneImagePrompt = `${sceneDescriptions[sceneIdx].label}, cinematic, dramatic lighting, vibrant colors, professional illustration, no text, no logos`;
+                  const sceneImageResp = await env.AI.run("@cf/black-forest-labs/flux-1-schnell", { prompt: sceneImagePrompt });
+                  const sceneImageBase64 = sceneImageResp.image;
+
+                  frames = await captureImageSceneFrames(page, {
+                    imageBase64: sceneImageBase64,
+                    motionType: motionType,
+                    labelText: sceneDescriptions[sceneIdx].label
+                  }, 6, 150);
+                } catch (sceneImgErr) {
+                  console.log(`Non-fatal: scene image generation failed for scene ${sceneIdx}, falling back to gradient:`, sceneImgErr.message);
+                  const colorPair = COLOR_PAIRS[(contentPlanId + sceneIdx) % COLOR_PAIRS.length];
+                  frames = await captureSceneFrames(page, {
+                    emoji: sceneDescriptions[sceneIdx].emoji,
+                    primaryColor: colorPair[0],
+                    secondaryColor: colorPair[1],
+                    motionType: motionType,
+                    labelText: sceneDescriptions[sceneIdx].label
+                  }, 6, 150);
+                }
+              } else {
+                console.log(`Neuron budget exhausted, using gradient fallback for scene ${sceneIdx}`);
+                const colorPair = COLOR_PAIRS[(contentPlanId + sceneIdx) % COLOR_PAIRS.length];
+                frames = await captureSceneFrames(page, {
+                  emoji: sceneDescriptions[sceneIdx].emoji,
+                  primaryColor: colorPair[0],
+                  secondaryColor: colorPair[1],
+                  motionType: motionType,
+                  labelText: sceneDescriptions[sceneIdx].label
+                }, 6, 150);
+              }
 
               const frameUrls = [];
               for (let frameIdx = 0; frameIdx < frames.length; frameIdx++) {
@@ -1071,6 +1169,9 @@ export default {
     }
   }
 };
+
+
+
 
 
 
