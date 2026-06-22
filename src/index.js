@@ -518,6 +518,12 @@ export default {
           console.log(`Channel identity setup complete: "${identity.name}"`);
         } catch (setupErr) {
           console.log("ERROR during channel identity setup:", setupErr.message);
+
+          if (setupErr.message.includes("youtubeSignupRequired")) {
+            await env.ai_ceo_memory.prepare(
+              "INSERT INTO system_alerts (alert_type, message) VALUES (?, ?)"
+            ).bind("CHANNEL_SETUP_NEEDED", "YouTube channel has not been created yet for this account. Visit youtube.com while signed into the channel account and create the channel, then setup will work automatically.").run();
+          }
         }
       }
       const url = `https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics&chart=mostPopular&maxResults=10&regionCode=US&key=${env.YOUTUBE_API_KEY}`;
@@ -870,6 +876,12 @@ export default {
           console.log(`Video id=${video.id} marked as published with youtube_video_id=${youtubeVideoId}`);
         } catch (publishErr) {
           console.log(`ERROR publishing video id=${video.id}:`, publishErr.message);
+
+          if (publishErr.message.includes("youtubeSignupRequired")) {
+            await env.ai_ceo_memory.prepare(
+              "INSERT INTO system_alerts (alert_type, message) VALUES (?, ?)"
+            ).bind("CHANNEL_SETUP_NEEDED", "YouTube channel has not been created yet for this account. Visit youtube.com while signed into the channel account and create the channel, then publishing will work automatically.").run();
+          }
         }
       }
 
@@ -879,6 +891,8 @@ export default {
     }
   }
 };
+
+
 
 
 
