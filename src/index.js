@@ -480,6 +480,16 @@ function passesEconomicsGate(opp, generatedScript) {
   return { passes: true, reason: null };
 }
 
+const EVERGREEN_KEYWORDS = [
+  "explained", "lore", "history of", "origin of", "every", "ranked", "tier list",
+  "strongest", "weakest", "all characters", "timeline", "guide", "evolution of"
+];
+
+function isEvergreenTopic(title) {
+  const lower = title.toLowerCase();
+  return EVERGREEN_KEYWORDS.some(keyword => lower.includes(keyword));
+}
+
 const SAFETY_BLOCKLIST = {
   violent_dangerous: ["shooting", "murder", "death", "war crime", "explosion", "terrorist", "weapon sale", "torture", "execution", "massacre"],
   child_safety: ["child", "minor", "csam", "groom", "underage"],
@@ -905,6 +915,12 @@ export default {
             profitScore = profitScore * 0.6;
             status = "needs_commentary_angle";
             note = "Repost-only content; requires reaction/commentary framing to avoid copyright issues";
+          }
+
+          const isEvergreen = isEvergreenTopic(title);
+          if (isEvergreen) {
+            profitScore = profitScore * 1.3;
+            note = note + " [evergreen topic - durable, product-linkable potential]";
           }
 
           await env.ai_ceo_memory.prepare(
@@ -1335,6 +1351,8 @@ export default {
     }
   }
 };
+
+
 
 
 
