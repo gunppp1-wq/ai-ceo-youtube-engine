@@ -35,6 +35,22 @@ async function b2UploadFile(uploadUrl, uploadAuthToken, fileName, bytes, content
   return await res.json();
 }
 
+async function b2DeleteFileVersion(apiUrl, authToken, fileId, fileName) {
+  const res = await fetch(`${apiUrl}/b2api/v3/b2_delete_file_version`, {
+    method: "POST",
+    headers: {
+      "Authorization": authToken,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ fileId, fileName })
+  });
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`B2 delete file failed: ${res.status} ${errBody}`);
+  }
+  return await res.json();
+}
+
 async function callRenderAssembler(payload) {
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
@@ -844,13 +860,13 @@ export default {
 
           const thumbUploadUrlData = await b2GetUploadUrl(apiUrl, authToken, env.B2_BUCKET_ID);
           const thumbnailFileName = `thumbnails/content_plan_${contentPlanId}_thumb.jpg`;
-          await b2UploadFile(thumbUploadUrlData.uploadUrl, thumbUploadUrlData.authorizationToken, thumbnailFileName, thumbBytes, "image/jpeg");
+          const thumbUploadResult = await b2UploadFile(thumbUploadUrlData.uploadUrl, thumbUploadUrlData.authorizationToken, thumbnailFileName, thumbBytes, "image/jpeg");
           const thumbnailDownloadUrl = `${downloadUrlBase}/file/ai-ceo-media/${thumbnailFileName}?Authorization=${authToken}`;
           console.log(`Thumbnail generated and uploaded: ${thumbnailFileName}`);
 
           const uploadUrlData = await b2GetUploadUrl(apiUrl, authToken, env.B2_BUCKET_ID);
           const audioFileName = `audio/content_plan_${contentPlanId}.mp3`;
-          await b2UploadFile(uploadUrlData.uploadUrl, uploadUrlData.authorizationToken, audioFileName, audioBytes, "audio/mpeg");
+          const audioUploadResult = await b2UploadFile(uploadUrlData.uploadUrl, uploadUrlData.authorizationToken, audioFileName, audioBytes, "audio/mpeg");
 
           console.log(`Video assets uploaded for content_plan_id=${contentPlanId}: ${audioFileName}, ${sceneFrameUrls.length} scenes x ${sceneFrameUrls[0]?.length || 0} frames`);
 
@@ -867,9 +883,15 @@ export default {
             outputFileName: finalVideoFileName
           });
 
+          const b2FileIds = JSON.stringify({
+            video: { fileId: assembleResult.fileId, fileName: finalVideoFileName },
+            thumbnail: { fileId: thumbUploadResult.fileId, fileName: thumbnailFileName },
+            audio: { fileId: audioUploadResult.fileId, fileName: audioFileName }
+          });
+
           await env.ai_ceo_memory.prepare(
-            "INSERT INTO videos (content_plan_id, status, thumbnail_url, video_file_name) VALUES (?, ?, ?, ?)"
-          ).bind(contentPlanId, "video_ready", thumbnailDownloadUrl, finalVideoFileName).run();
+            "INSERT INTO videos (content_plan_id, status, thumbnail_url, video_file_name, b2_file_ids) VALUES (?, ?, ?, ?, ?)"
+          ).bind(contentPlanId, "video_ready", thumbnailDownloadUrl, finalVideoFileName, b2FileIds).run();
 
           console.log(`Video fully assembled for content_plan_id=${contentPlanId}: ${finalVideoFileName} (fileId: ${assembleResult.fileId})`);
         } catch (videoErr) {
@@ -939,6 +961,25 @@ export default {
           ).bind("published", youtubeVideoId, video.id).run();
 
           console.log(`Video id=${video.id} marked as published with youtube_video_id=${youtubeVideoId}`);
+
+          if (video.b2_file_ids) {
+            try {
+              const fileIds = JSON.parse(video.b2_file_ids);
+              const cleanupAuthData = await b2Authorize(env);
+              const cleanupApiUrl = cleanupAuthData.apiInfo.storageApi.apiUrl;
+              const cleanupAuthToken = cleanupAuthData.authorizationToken;
+
+              for (const key of ["video", "thumbnail", "audio"]) {
+                const fileInfo = fileIds[key];
+                if (fileInfo && fileInfo.fileId && fileInfo.fileName) {
+                  await b2DeleteFileVersion(cleanupApiUrl, cleanupAuthToken, fileInfo.fileId, fileInfo.fileName);
+                  console.log(`Deleted B2 file after publish: ${fileInfo.fileName}`);
+                }
+              }
+            } catch (cleanupErr) {
+              console.log(`Non-fatal: B2 cleanup failed for video id=${video.id}:`, cleanupErr.message);
+            }
+          }
         } catch (publishErr) {
           console.log(`ERROR publishing video id=${video.id}:`, publishErr.message);
 
@@ -956,6 +997,11 @@ export default {
     }
   }
 };
+
+
+
+
+
 
 
 
