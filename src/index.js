@@ -974,6 +974,15 @@ export default {
       ).all();
       const competitorTitleExamples = topCompetitorTitles.results.map(r => r.video_title).join(", ");
 
+      const backlogCheck = await env.ai_ceo_memory.prepare(
+        "SELECT COUNT(*) as cnt FROM content_plans cp WHERE NOT EXISTS (SELECT 1 FROM videos v WHERE v.content_plan_id = cp.id)"
+      ).first();
+      const unusedPlanCount = backlogCheck ? backlogCheck.cnt : 0;
+      const MAX_CONTENT_BACKLOG = 5;
+
+      if (unusedPlanCount >= MAX_CONTENT_BACKLOG) {
+        console.log(`Skipping new content generation: ${unusedPlanCount} unused content plans already in backlog (max ${MAX_CONTENT_BACKLOG}). Letting asset generation catch up first.`);
+      } else {
       for (const opp of topOpportunities.results) {
         let success = false;
         let generatedTitle, generatedScript, contentPlanId, sceneDescriptions, thumbnailDescription;
@@ -1220,6 +1229,7 @@ export default {
           console.log(`ERROR generating/uploading video assets for content_plan_id=${contentPlanId}:`, videoErr.message);
         }
       }
+      }
 
       const currentUtcHour = new Date().getUTCHours();
       const videosToPublish = await env.ai_ceo_memory.prepare(
@@ -1382,6 +1392,8 @@ export default {
     }
   }
 };
+
+
 
 
 
