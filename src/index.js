@@ -1319,7 +1319,7 @@ export default {
           if (!videoFileRes.ok) throw new Error(`Failed to download video file from B2: ${videoFileRes.status}`);
           const videoBytes = new Uint8Array(await videoFileRes.arrayBuffer());
 
-          const shortsDescription = `${plan.script}\n\n#Shorts`;
+          const shortsDescription = `${plan.script}\n\nNew videos posted regularly - subscribe so you don't miss the next one.\n\n#Shorts`;
           const videoCategoryId = detectVideoCategory(plan.title);
           const videoTags = generateTags(plan.title);
           const uploadResult = await uploadVideoToYoutube(accessToken, videoBytes, plan.title, shortsDescription, videoCategoryId, videoTags);
@@ -1463,6 +1463,7 @@ export default {
     }
   }
 };
+
 
 
 
