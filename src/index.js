@@ -238,6 +238,40 @@ async function getOwnChannelId(accessToken) {
   return data.items[0].id;
 }
 
+const DAILY_NEURON_BUDGET = 10000;
+const ESTIMATED_NEURON_COST = {
+  text_generation: 150,
+  tts: 8200,
+  image_generation: 700
+};
+
+async function checkNeuronBudget(env, operationType) {
+  const today = new Date().toISOString().slice(0, 10);
+  const row = await env.ai_ceo_memory.prepare(
+    "SELECT count FROM daily_usage WHERE usage_date = ? AND op_type = ?"
+  ).bind(today, "neurons_estimated").first();
+
+  const usedSoFar = row ? row.count : 0;
+  const estimatedCost = ESTIMATED_NEURON_COST[operationType] || 200;
+
+  if (usedSoFar + estimatedCost > DAILY_NEURON_BUDGET) {
+    console.log(`Estimated neuron budget would be exceeded for ${operationType}: ${usedSoFar} used + ${estimatedCost} estimated > ${DAILY_NEURON_BUDGET}`);
+    return false;
+  }
+
+  if (row) {
+    await env.ai_ceo_memory.prepare(
+      "UPDATE daily_usage SET count = count + ? WHERE usage_date = ? AND op_type = ?"
+    ).bind(estimatedCost, today, "neurons_estimated").run();
+  } else {
+    await env.ai_ceo_memory.prepare(
+      "INSERT INTO daily_usage (usage_date, op_type, count) VALUES (?, ?, ?)"
+    ).bind(today, "neurons_estimated", estimatedCost).run();
+  }
+
+  return true;
+}
+
 const DAILY_B2_OP_LIMIT = 30;
 
 async function checkAndIncrementDailyLimit(env, opType) {
@@ -678,6 +712,12 @@ export default {
             continue;
           }
 
+          const canProceedNeuronBudget = await checkNeuronBudget(env, "tts");
+          if (!canProceedNeuronBudget) {
+            console.log(`Skipping asset generation for content_plan_id=${contentPlanId}: estimated neuron budget exhausted for today`);
+            continue;
+          }
+
           const ttsResp = await env.AI.run("@cf/deepgram/aura-1", {
             text: generatedScript
           }, { returnRawResponse: true });
@@ -839,6 +879,8 @@ export default {
     }
   }
 };
+
+
 
 
 
