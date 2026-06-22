@@ -165,6 +165,39 @@ async function uploadVideoToYoutube(accessToken, videoBytes, title, description)
   return await uploadRes.json();
 }
 
+async function getVideoStatus(accessToken, videoId) {
+  const res = await fetch(`https://www.googleapis.com/youtube/v3/videos?part=status,statistics&id=${videoId}`, {
+    headers: { "Authorization": `Bearer ${accessToken}` }
+  });
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Get video status failed: ${res.status} ${errBody}`);
+  }
+  const data = await res.json();
+  if (!data.items || !data.items[0]) {
+    return { exists: false };
+  }
+  return {
+    exists: true,
+    privacyStatus: data.items[0].status.privacyStatus,
+    uploadStatus: data.items[0].status.uploadStatus,
+    rejectionReason: data.items[0].status.rejectionReason || null,
+    viewCount: data.items[0].statistics?.viewCount || "0"
+  };
+}
+
+async function deleteYoutubeVideo(accessToken, videoId) {
+  const res = await fetch(`https://www.googleapis.com/youtube/v3/videos?id=${videoId}`, {
+    method: "DELETE",
+    headers: { "Authorization": `Bearer ${accessToken}` }
+  });
+  if (!res.ok && res.status !== 204) {
+    const errBody = await res.text();
+    throw new Error(`Delete video failed: ${res.status} ${errBody}`);
+  }
+  return true;
+}
+
 async function setYoutubeThumbnail(accessToken, videoId, thumbnailBytes) {
   const res = await fetch(`https://www.googleapis.com/upload/youtube/v3/thumbnails/set?videoId=${videoId}`, {
     method: "POST",
@@ -991,12 +1024,55 @@ export default {
         }
       }
 
+      const publishedVideos = await env.ai_ceo_memory.prepare(
+        "SELECT v.id, v.content_plan_id, v.youtube_video_id, cp.title, cp.script FROM videos v JOIN content_plans cp ON v.content_plan_id = cp.id WHERE v.status = 'published' AND v.youtube_video_id IS NOT NULL"
+      ).all();
+
+      for (const pubVideo of publishedVideos.results) {
+        try {
+          const modAccessToken = await getYoutubeAccessToken(env);
+          const videoStatus = await getVideoStatus(modAccessToken, pubVideo.youtube_video_id);
+
+          if (!videoStatus.exists || videoStatus.privacyStatus === "private" || videoStatus.rejectionReason) {
+            const reason = !videoStatus.exists
+              ? "video no longer exists on YouTube"
+              : videoStatus.rejectionReason
+                ? `rejected: ${videoStatus.rejectionReason}`
+                : "privacy status changed to private (likely a platform strike)";
+
+            console.log(`MODERATION: video id=${pubVideo.id} (youtube_video_id=${pubVideo.youtube_video_id}) flagged: ${reason}`);
+
+            await env.ai_ceo_memory.prepare(
+              "INSERT INTO removed_videos (original_video_id, content_plan_id, title, script, youtube_video_id, removal_reason, views_at_removal) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            ).bind(pubVideo.id, pubVideo.content_plan_id, pubVideo.title, pubVideo.script, pubVideo.youtube_video_id, reason, videoStatus.viewCount || 0).run();
+
+            if (videoStatus.exists) {
+              await deleteYoutubeVideo(modAccessToken, pubVideo.youtube_video_id);
+            }
+
+            await env.ai_ceo_memory.prepare(
+              "UPDATE videos SET status = ? WHERE id = ?"
+            ).bind("removed", pubVideo.id).run();
+
+            await env.ai_ceo_memory.prepare(
+              "INSERT INTO system_alerts (alert_type, message) VALUES (?, ?)"
+            ).bind("VIDEO_REMOVED", `video id=${pubVideo.id} removed: ${reason}`).run();
+
+            console.log(`Video id=${pubVideo.id} removed and data preserved in removed_videos`);
+          }
+        } catch (modErr) {
+          console.log(`Non-fatal: moderation check failed for video id=${pubVideo.id}:`, modErr.message);
+        }
+      }
+
       console.log("scheduled() completed successfully");
     } catch (outerErr) {
       console.log("FATAL ERROR in scheduled():", outerErr.message, outerErr.stack);
     }
   }
 };
+
+
 
 
 
