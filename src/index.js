@@ -116,12 +116,13 @@ async function getYoutubeAccessToken(env) {
   return data.access_token;
 }
 
-async function uploadVideoToYoutube(accessToken, videoBytes, title, description) {
+async function uploadVideoToYoutube(accessToken, videoBytes, title, description, categoryId = "24", tags = []) {
   const metadata = {
     snippet: {
       title: title.slice(0, 100),
       description: description.slice(0, 5000),
-      categoryId: "24"
+      categoryId: categoryId,
+      tags: tags.slice(0, 15)
     },
     status: {
       privacyStatus: "public",
@@ -478,6 +479,29 @@ function passesEconomicsGate(opp, generatedScript) {
   }
 
   return { passes: true, reason: null };
+}
+
+const CATEGORY_KEYWORDS = {
+  "20": ["game", "gaming", "gameplay", "esports", "playstation", "xbox", "nintendo", "steam", "fortnite", "minecraft", "valorant"],
+  "10": ["music", "song", "album", "official video", "lyric", "rapper", "concert", "remix"],
+  "1": ["movie", "trailer", "film", "actor", "actress", "box office", "cinema"],
+  "24": ["show", "series", "episode", "drama", "celebrity", "tv"]
+};
+
+function detectVideoCategory(title) {
+  const lower = title.toLowerCase();
+  for (const [categoryId, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
+    if (keywords.some(k => lower.includes(k))) {
+      return categoryId;
+    }
+  }
+  return "24";
+}
+
+function generateTags(title) {
+  const stopWords = new Set(["the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "is", "it", "this", "that"]);
+  const words = title.toLowerCase().replace(/[^a-z0-9 ]/g, "").split(/\s+/).filter(w => w.length > 2 && !stopWords.has(w));
+  return [...new Set(words)].slice(0, 10);
 }
 
 const EVERGREEN_KEYWORDS = [
@@ -1233,7 +1257,9 @@ export default {
           const videoBytes = new Uint8Array(await videoFileRes.arrayBuffer());
 
           const shortsDescription = `${plan.script}\n\n#Shorts`;
-          const uploadResult = await uploadVideoToYoutube(accessToken, videoBytes, plan.title, shortsDescription);
+          const videoCategoryId = detectVideoCategory(plan.title);
+          const videoTags = generateTags(plan.title);
+          const uploadResult = await uploadVideoToYoutube(accessToken, videoBytes, plan.title, shortsDescription, videoCategoryId, videoTags);
           const youtubeVideoId = uploadResult.id;
 
           console.log(`Video uploaded to YouTube: videoId=${youtubeVideoId}`);
@@ -1351,6 +1377,9 @@ export default {
     }
   }
 };
+
+
+
 
 
 
