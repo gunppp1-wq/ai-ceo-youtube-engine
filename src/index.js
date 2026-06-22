@@ -186,6 +186,43 @@ async function getVideoStatus(accessToken, videoId) {
   };
 }
 
+async function fetchVideoAnalytics(accessToken, channelId, videoId) {
+  const endDate = new Date().toISOString().slice(0, 10);
+  const startDate = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+  const params = new URLSearchParams({
+    ids: `channel==${channelId}`,
+    startDate: startDate,
+    endDate: endDate,
+    metrics: "views,estimatedMinutesWatched,averageViewDuration,likes,comments,subscribersGained",
+    filters: `video==${videoId}`
+  });
+
+  const res = await fetch(`https://youtubeanalytics.googleapis.com/v2/reports?${params.toString()}`, {
+    headers: { "Authorization": `Bearer ${accessToken}` }
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`YouTube Analytics fetch failed: ${res.status} ${errBody}`);
+  }
+
+  const data = await res.json();
+  if (!data.rows || !data.rows[0]) {
+    return { views: 0, watchTimeMinutes: 0, averageViewDuration: 0, likes: 0, comments: 0, subscribersGained: 0 };
+  }
+
+  const row = data.rows[0];
+  return {
+    views: row[0] || 0,
+    watchTimeMinutes: row[1] || 0,
+    averageViewDuration: row[2] || 0,
+    likes: row[3] || 0,
+    comments: row[4] || 0,
+    subscribersGained: row[5] || 0
+  };
+}
+
 async function deleteYoutubeVideo(accessToken, videoId) {
   const res = await fetch(`https://www.googleapis.com/youtube/v3/videos?id=${videoId}`, {
     method: "DELETE",
@@ -1158,6 +1195,19 @@ export default {
             ).bind("VIDEO_REMOVED", `video id=${pubVideo.id} removed: ${reason}`).run();
 
             console.log(`Video id=${pubVideo.id} removed and data preserved in removed_videos`);
+          } else {
+            try {
+              const analyticsChannelId = await getOwnChannelId(modAccessToken);
+              const analytics = await fetchVideoAnalytics(modAccessToken, analyticsChannelId, pubVideo.youtube_video_id);
+
+              await env.ai_ceo_memory.prepare(
+                "INSERT INTO video_performance (video_id, views, watch_time_minutes, average_view_duration, likes, comments) VALUES (?, ?, ?, ?, ?, ?)"
+              ).bind(pubVideo.id, analytics.views, analytics.watchTimeMinutes, analytics.averageViewDuration, analytics.likes, analytics.comments).run();
+
+              console.log(`Analytics recorded for video id=${pubVideo.id}: ${analytics.views} views, ${analytics.watchTimeMinutes} min watched`);
+            } catch (analyticsErr) {
+              console.log(`Non-fatal: analytics fetch failed for video id=${pubVideo.id}:`, analyticsErr.message);
+            }
           }
         } catch (modErr) {
           console.log(`Non-fatal: moderation check failed for video id=${pubVideo.id}:`, modErr.message);
@@ -1170,6 +1220,8 @@ export default {
     }
   }
 };
+
+
 
 
 
