@@ -185,6 +185,28 @@ async function checkAndIncrementDailyLimit(env, opType) {
   return true;
 }
 
+const MIN_PROFIT_SCORE = 100;
+const MIN_SCRIPT_LENGTH = 80;
+
+function passesEconomicsGate(opp, generatedScript) {
+  if (!opp.profit_score || opp.profit_score < MIN_PROFIT_SCORE) {
+    return { passes: false, reason: `profit_score too low or missing: ${opp.profit_score}` };
+  }
+
+  if (!generatedScript || generatedScript.trim().length < MIN_SCRIPT_LENGTH) {
+    return { passes: false, reason: `script too short or missing: ${generatedScript ? generatedScript.trim().length : 0} chars` };
+  }
+
+  const words = generatedScript.trim().split(/\s+/);
+  const uniqueWords = new Set(words.map(w => w.toLowerCase()));
+  const repetitionRatio = uniqueWords.size / words.length;
+  if (words.length > 10 && repetitionRatio < 0.4) {
+    return { passes: false, reason: `script appears too repetitive: ${uniqueWords.size}/${words.length} unique words` };
+  }
+
+  return { passes: true, reason: null };
+}
+
 const SAFETY_BLOCKLIST = {
   violent_dangerous: ["shooting", "murder", "death", "war crime", "explosion", "terrorist", "weapon sale", "torture", "execution", "massacre"],
   child_safety: ["child", "minor", "csam", "groom", "underage"],
@@ -519,6 +541,15 @@ export default {
             continue;
           }
 
+          const economicsCheck = passesEconomicsGate(opp, generatedScript);
+          if (!economicsCheck.passes) {
+            console.log(`ECONOMICS GATE BLOCKED content_plan_id=${contentPlanId}: ${economicsCheck.reason}`);
+            await env.ai_ceo_memory.prepare(
+              "INSERT INTO system_alerts (alert_type, message) VALUES (?, ?)"
+            ).bind("ECONOMICS_GATE_BLOCKED", `content_plan_id=${contentPlanId}: ${economicsCheck.reason}`).run();
+            continue;
+          }
+
           const canProceedAudio = await checkAndIncrementDailyLimit(env, "b2_audio_upload");
           const canProceedFrames = await checkAndIncrementDailyLimit(env, "browser_render_scene");
           const canProceedThumbnail = await checkAndIncrementDailyLimit(env, "thumbnail_generation");
@@ -689,6 +720,8 @@ export default {
     }
   }
 };
+
+
 
 
 
