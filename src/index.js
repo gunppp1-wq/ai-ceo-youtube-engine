@@ -456,10 +456,10 @@ function buildImageSceneHtml({ imageBase64, motionType, labelText }) {
 <html>
 <head>
 <style>
-  body { margin: 0; width: 1280px; height: 720px; overflow: hidden; font-family: Arial, sans-serif; }
-  .scene { width: 1280px; height: 720px; position: relative; overflow: hidden; background: #000; }
+  body { margin: 0; width: 1080px; height: 1920px; overflow: hidden; font-family: Arial, sans-serif; }
+  .scene { width: 1080px; height: 1920px; position: relative; overflow: hidden; background: #000; }
   .bgimg {
-    position: absolute; top: 0; left: 0; width: 1280px; height: 720px;
+    position: absolute; top: 0; left: 0; width: 1080px; height: 1920px;
     background-image: url(data:image/jpeg;base64,${imageBase64});
     background-size: cover; background-position: center;
     animation: sceneZoom 6s ease-in-out forwards;
@@ -514,9 +514,9 @@ function buildSceneHtml({ emoji, primaryColor, secondaryColor, motionType, label
 <html>
 <head>
 <style>
-  body { margin: 0; width: 1280px; height: 720px; overflow: hidden; font-family: Arial, sans-serif; }
+  body { margin: 0; width: 1080px; height: 1920px; overflow: hidden; font-family: Arial, sans-serif; }
   .scene {
-    width: 1280px; height: 720px;
+    width: 1080px; height: 1920px;
     background: linear-gradient(135deg, ${primaryColor}, ${secondaryColor});
     display: flex; flex-direction: column; align-items: center; justify-content: center;
     position: relative;
@@ -925,7 +925,7 @@ export default {
 
           const browser = await puppeteer.launch(env.BROWSER);
           const page = await browser.newPage();
-          await page.setViewport({ width: 1280, height: 720 });
+          await page.setViewport({ width: 1080, height: 1920 });
 
           const sceneFrameUrls = [];
           try {
@@ -1069,7 +1069,8 @@ export default {
           if (!videoFileRes.ok) throw new Error(`Failed to download video file from B2: ${videoFileRes.status}`);
           const videoBytes = new Uint8Array(await videoFileRes.arrayBuffer());
 
-          const uploadResult = await uploadVideoToYoutube(accessToken, videoBytes, plan.title, plan.script);
+          const shortsDescription = `${plan.script}\n\n#Shorts`;
+          const uploadResult = await uploadVideoToYoutube(accessToken, videoBytes, plan.title, shortsDescription);
           const youtubeVideoId = uploadResult.id;
 
           console.log(`Video uploaded to YouTube: videoId=${youtubeVideoId}`);
@@ -1169,6 +1170,10 @@ export default {
     }
   }
 };
+
+
+
+
 
 
 
