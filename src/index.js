@@ -813,6 +813,11 @@ export default {
           await env.ai_ceo_memory.prepare(
             "INSERT INTO daily_usage (usage_date, op_type, count) VALUES (?, ?, 1)"
           ).bind(today, "competitor_check").run();
+
+          await env.ai_ceo_memory.prepare(
+            "DELETE FROM competitor_insights WHERE collected_at < datetime('now', '-7 days')"
+          ).run();
+          console.log("Cleaned up competitor_insights rows older than 7 days");
         } catch (competitorErr) {
           console.log("Non-fatal: competitor insights collection failed:", competitorErr.message);
         }
@@ -1377,6 +1382,7 @@ export default {
     }
   }
 };
+
 
 
 
