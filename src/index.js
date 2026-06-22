@@ -711,7 +711,15 @@ export default {
         "SELECT id FROM channel_setup LIMIT 1"
       ).first();
 
-      if (!channelSetupDone) {
+      const setupAttemptsRow = await env.ai_ceo_memory.prepare(
+        "SELECT attempts FROM channel_setup_attempts WHERE id = 1"
+      ).first();
+      const setupAttempts = setupAttemptsRow ? setupAttemptsRow.attempts : 0;
+      const MAX_CHANNEL_SETUP_ATTEMPTS = 3;
+
+      if (!channelSetupDone && setupAttempts >= MAX_CHANNEL_SETUP_ATTEMPTS) {
+        console.log(`Channel identity setup has failed ${setupAttempts} times, pausing retries. Check system_alerts for details.`);
+      } else if (!channelSetupDone) {
         try {
           console.log("Running one-time channel identity setup...");
           const identity = await generateChannelIdentity(env);
@@ -741,10 +749,19 @@ export default {
         } catch (setupErr) {
           console.log("ERROR during channel identity setup:", setupErr.message);
 
+          const newAttemptCount = setupAttempts + 1;
+          await env.ai_ceo_memory.prepare(
+            "INSERT INTO channel_setup_attempts (id, attempts) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET attempts = ?"
+          ).bind(newAttemptCount, newAttemptCount).run();
+
           if (setupErr.message.includes("youtubeSignupRequired")) {
             await env.ai_ceo_memory.prepare(
               "INSERT INTO system_alerts (alert_type, message) VALUES (?, ?)"
             ).bind("CHANNEL_SETUP_NEEDED", "YouTube channel has not been created yet for this account. Visit youtube.com while signed into the channel account and create the channel, then setup will work automatically.").run();
+          } else if (newAttemptCount >= MAX_CHANNEL_SETUP_ATTEMPTS) {
+            await env.ai_ceo_memory.prepare(
+              "INSERT INTO system_alerts (alert_type, message) VALUES (?, ?)"
+            ).bind("CHANNEL_SETUP_PAUSED", `Channel identity setup failed ${newAttemptCount} times (last error: ${setupErr.message}). Pausing automatic retries to save quota. Manual investigation needed.`).run();
           }
         }
       }
@@ -1220,6 +1237,8 @@ export default {
     }
   }
 };
+
+
 
 
 
