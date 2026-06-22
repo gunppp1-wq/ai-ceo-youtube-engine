@@ -337,6 +337,28 @@ async function getOwnChannelId(accessToken) {
   return data.items[0].id;
 }
 
+async function getNextRotationHour(env) {
+  for (let h = 0; h < 24; h++) {
+    const row = await env.ai_ceo_memory.prepare(
+      "SELECT hour FROM publish_hour_rotation WHERE hour = ?"
+    ).bind(h).first();
+    if (!row) {
+      return h;
+    }
+  }
+
+  const leastRecent = await env.ai_ceo_memory.prepare(
+    "SELECT hour FROM publish_hour_rotation ORDER BY last_used_at ASC LIMIT 1"
+  ).first();
+  return leastRecent ? leastRecent.hour : 0;
+}
+
+async function markHourUsed(env, hour) {
+  await env.ai_ceo_memory.prepare(
+    "INSERT INTO publish_hour_rotation (hour, last_used_at) VALUES (?, datetime('now')) ON CONFLICT(hour) DO UPDATE SET last_used_at = datetime('now')"
+  ).bind(hour).run();
+}
+
 const DAILY_NEURON_BUDGET = 10000;
 const ESTIMATED_NEURON_COST = {
   text_generation: 150,
@@ -1074,9 +1096,15 @@ export default {
             audio: { fileId: audioUploadResult.fileId, fileName: audioFileName }
           });
 
+          const oppAgeHours = opp.created_at ? (Date.now() - new Date(opp.created_at + "Z").getTime()) / (1000 * 60 * 60) : 999;
+          const isFreshTrend = oppAgeHours <= 3;
+          const targetHour = isFreshTrend ? null : await getNextRotationHour(env);
+
           await env.ai_ceo_memory.prepare(
-            "INSERT INTO videos (content_plan_id, status, thumbnail_url, video_file_name, b2_file_ids) VALUES (?, ?, ?, ?, ?)"
-          ).bind(contentPlanId, "video_ready", thumbnailDownloadUrl, finalVideoFileName, b2FileIds).run();
+            "INSERT INTO videos (content_plan_id, status, thumbnail_url, video_file_name, b2_file_ids, target_publish_hour) VALUES (?, ?, ?, ?, ?, ?)"
+          ).bind(contentPlanId, "video_ready", thumbnailDownloadUrl, finalVideoFileName, b2FileIds, targetHour).run();
+
+          console.log(`Video for content_plan_id=${contentPlanId} is ${isFreshTrend ? "fresh (publishing immediately)" : `not fresh, targeting hour ${targetHour} for rotation`}`);
 
           console.log(`Video fully assembled for content_plan_id=${contentPlanId}: ${finalVideoFileName} (fileId: ${assembleResult.fileId})`);
         } catch (videoErr) {
@@ -1084,9 +1112,10 @@ export default {
         }
       }
 
+      const currentUtcHour = new Date().getUTCHours();
       const videosToPublish = await env.ai_ceo_memory.prepare(
-        "SELECT * FROM videos WHERE status = 'video_ready' ORDER BY id ASC LIMIT 1"
-      ).all();
+        "SELECT * FROM videos WHERE status = 'video_ready' AND (target_publish_hour IS NULL OR target_publish_hour = ?) ORDER BY id ASC LIMIT 1"
+      ).bind(currentUtcHour).all();
 
       for (const video of videosToPublish.results) {
         try {
@@ -1147,6 +1176,11 @@ export default {
           ).bind("published", youtubeVideoId, video.id).run();
 
           console.log(`Video id=${video.id} marked as published with youtube_video_id=${youtubeVideoId}`);
+
+          if (video.target_publish_hour !== null && video.target_publish_hour !== undefined) {
+            await markHourUsed(env, video.target_publish_hour);
+            console.log(`Marked hour ${video.target_publish_hour} as used in rotation`);
+          }
 
           if (video.b2_file_ids) {
             try {
@@ -1237,6 +1271,10 @@ export default {
     }
   }
 };
+
+
+
+
 
 
 
