@@ -65,10 +65,23 @@ async function callRenderAssembler(payload) {
 }
 
 async function getYoutubeAccessToken(env) {
+  let refreshToken = env.YOUTUBE_REFRESH_TOKEN;
+
+  try {
+    const tokenRow = await env.ai_ceo_memory.prepare(
+      "SELECT refresh_token FROM oauth_tokens WHERE purpose = ?"
+    ).bind("youtube_main").first();
+    if (tokenRow && tokenRow.refresh_token) {
+      refreshToken = tokenRow.refresh_token;
+    }
+  } catch (dbErr) {
+    console.log("Non-fatal: could not check oauth_tokens table, using secret fallback:", dbErr.message);
+  }
+
   const params = new URLSearchParams({
     client_id: env.GOOGLE_CLIENT_ID,
     client_secret: env.GOOGLE_CLIENT_SECRET,
-    refresh_token: env.YOUTUBE_REFRESH_TOKEN,
+    refresh_token: refreshToken,
     grant_type: "refresh_token"
   });
 
@@ -474,6 +487,58 @@ function cleanImageDescription(desc) {
 
 export default {
   async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+
+    if (url.pathname === "/authorize") {
+      const scopes = [
+        "https://www.googleapis.com/auth/youtube",
+        "https://www.googleapis.com/auth/youtube.upload",
+        "https://www.googleapis.com/auth/yt-analytics.readonly",
+        "https://www.googleapis.com/auth/yt-analytics-monetary.readonly"
+      ].join(" ");
+
+      const redirectUri = `${url.origin}/oauth/callback`;
+      const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(env.GOOGLE_CLIENT_ID)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${encodeURIComponent(scopes)}&access_type=offline&prompt=consent`;
+
+      return Response.redirect(authUrl, 302);
+    }
+
+    if (url.pathname === "/oauth/callback") {
+      const code = url.searchParams.get("code");
+      if (!code) {
+        return new Response("Missing authorization code", { status: 400 });
+      }
+
+      const redirectUri = `${url.origin}/oauth/callback`;
+      const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          code: code,
+          client_id: env.GOOGLE_CLIENT_ID,
+          client_secret: env.GOOGLE_CLIENT_SECRET,
+          redirect_uri: redirectUri,
+          grant_type: "authorization_code"
+        }).toString()
+      });
+
+      if (!tokenRes.ok) {
+        const errBody = await tokenRes.text();
+        return new Response(`Token exchange failed: ${errBody}`, { status: 500 });
+      }
+
+      const tokenData = await tokenRes.json();
+      if (!tokenData.refresh_token) {
+        return new Response("No refresh token returned. Try visiting /authorize again (Google only returns a refresh token on first consent or with prompt=consent).", { status: 400 });
+      }
+
+      await env.ai_ceo_memory.prepare(
+        "INSERT INTO oauth_tokens (purpose, refresh_token, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(purpose) DO UPDATE SET refresh_token = ?, updated_at = datetime('now')"
+      ).bind("youtube_main", tokenData.refresh_token, tokenData.refresh_token).run();
+
+      return new Response("Authorization successful! The refresh token has been saved. You can close this page.", { status: 200 });
+    }
+
     const result = await env.ai_ceo_memory.prepare(
       "SELECT * FROM trends ORDER BY id DESC LIMIT 10"
     ).all();
@@ -891,6 +956,8 @@ export default {
     }
   }
 };
+
+
 
 
 
