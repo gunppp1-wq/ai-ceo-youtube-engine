@@ -154,6 +154,90 @@ async function setYoutubeThumbnail(accessToken, videoId, thumbnailBytes) {
   return await res.json();
 }
 
+async function generateChannelIdentity(env) {
+  const prompt = `${PERSONA}\n\nYou need to design the YouTube channel identity for this persona. Generate:\n1. A catchy channel NAME under 30 characters that reflects this skeptical-but-passionate commentator persona (not generic, memorable, fits a trending pop-culture/gaming/music commentary channel)\n2. A channel DESCRIPTION under 800 characters that tells potential subscribers what to expect, written in the persona voice\n3. A BANNER_PROMPT - a short visual description (for an AI image generator) for a YouTube channel banner background that fits this persona and content (dramatic, eye-catching, NOT containing any text/words/logos)\n\nFormat exactly as:\nNAME: <name>\nDESCRIPTION: <description>\nBANNER_PROMPT: <prompt>`;
+
+  const aiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+    messages: [{ role: "user", content: prompt }]
+  });
+
+  const responseText = aiResponse.response || "";
+  const nameMatch = responseText.match(/NAME:\s*(.+)/i);
+  const descMatch = responseText.match(/DESCRIPTION:\s*([\s\S]+?)(?=BANNER_PROMPT:|$)/i);
+  const bannerMatch = responseText.match(/BANNER_PROMPT:\s*(.+)/i);
+
+  const cleanName = nameMatch ? nameMatch[1].trim().replace(/["`]/g, "").replace(/\s+/g, " ").slice(0, 30).trim() : "";
+  const cleanDescription = descMatch ? descMatch[1].trim().replace(/["`]/g, "").slice(0, 800).trim() : "";
+
+  return {
+    name: (cleanName.length >= 3) ? cleanName : "The Skeptical Fan",
+    description: (cleanDescription.length >= 10) ? cleanDescription : "Calling out the hype, one trend at a time.",
+    bannerPrompt: bannerMatch ? bannerMatch[1].trim().replace(/["`]/g, "") : "dramatic dark cinematic background, bold colors"
+  };
+}
+
+async function uploadChannelBanner(accessToken, bannerBytes) {
+  const res = await fetch("https://www.googleapis.com/upload/youtube/v3/channelBanners/insert?uploadType=media", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${accessToken}`,
+      "Content-Type": "image/png"
+    },
+    body: bannerBytes
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Channel banner upload failed: ${res.status} ${errBody}`);
+  }
+
+  return await res.json();
+}
+
+async function applyChannelBranding(accessToken, channelId, title, description, bannerUrl) {
+  const body = {
+    id: channelId,
+    brandingSettings: {
+      channel: {
+        title: title,
+        description: description
+      }
+    }
+  };
+  if (bannerUrl) {
+    body.brandingSettings.image = { bannerExternalUrl: bannerUrl };
+  }
+
+  const res = await fetch("https://www.googleapis.com/youtube/v3/channels?part=brandingSettings", {
+    method: "PUT",
+    headers: {
+      "Authorization": `Bearer ${accessToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Channel branding update failed: ${res.status} ${errBody}`);
+  }
+
+  return await res.json();
+}
+
+async function getOwnChannelId(accessToken) {
+  const res = await fetch("https://www.googleapis.com/youtube/v3/channels?part=id&mine=true", {
+    headers: { "Authorization": `Bearer ${accessToken}` }
+  });
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Get own channel failed: ${res.status} ${errBody}`);
+  }
+  const data = await res.json();
+  if (!data.items || !data.items[0]) throw new Error("No channel found for this account");
+  return data.items[0].id;
+}
+
 const DAILY_B2_OP_LIMIT = 30;
 
 async function checkAndIncrementDailyLimit(env, opType) {
@@ -367,6 +451,41 @@ export default {
 
   async scheduled(event, env, ctx) {
     try {
+      const channelSetupDone = await env.ai_ceo_memory.prepare(
+        "SELECT id FROM channel_setup LIMIT 1"
+      ).first();
+
+      if (!channelSetupDone) {
+        try {
+          console.log("Running one-time channel identity setup...");
+          const identity = await generateChannelIdentity(env);
+          const accessToken = await getYoutubeAccessToken(env);
+          const channelId = await getOwnChannelId(accessToken);
+
+          let bannerUrl = null;
+          try {
+            const bannerResp = await env.AI.run("@cf/black-forest-labs/flux-1-schnell", {
+              prompt: `${identity.bannerPrompt}, 16:9 widescreen banner, no text, no logos`
+            });
+            const bannerBinaryString = atob(bannerResp.image);
+            const bannerBytes = Uint8Array.from(bannerBinaryString, (m) => m.codePointAt(0));
+            const bannerResult = await uploadChannelBanner(accessToken, bannerBytes);
+            bannerUrl = bannerResult.url;
+          } catch (bannerErr) {
+            console.log("Non-fatal: banner generation/upload failed:", bannerErr.message);
+          }
+
+          await applyChannelBranding(accessToken, channelId, identity.name, identity.description, bannerUrl);
+
+          await env.ai_ceo_memory.prepare(
+            "INSERT INTO channel_setup (completed_at) VALUES (datetime('now'))"
+          ).run();
+
+          console.log(`Channel identity setup complete: "${identity.name}"`);
+        } catch (setupErr) {
+          console.log("ERROR during channel identity setup:", setupErr.message);
+        }
+      }
       const url = `https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics&chart=mostPopular&maxResults=10&regionCode=US&key=${env.YOUTUBE_API_KEY}`;
       const res = await fetch(url);
       const data = await res.json();
@@ -720,6 +839,9 @@ export default {
     }
   }
 };
+
+
+
 
 
 
