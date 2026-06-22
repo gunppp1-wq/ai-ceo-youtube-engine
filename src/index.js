@@ -804,6 +804,36 @@ export default {
       return new Response("Authorization successful! The refresh token has been saved. You can close this page.", { status: 200 });
     }
 
+    if (url.pathname === "/status") {
+      try {
+        const today = new Date().toISOString().slice(0, 10);
+
+        const totalVideos = await env.ai_ceo_memory.prepare("SELECT COUNT(*) as cnt FROM videos WHERE status = 'published'").first();
+        const readyVideos = await env.ai_ceo_memory.prepare("SELECT COUNT(*) as cnt FROM videos WHERE status = 'video_ready'").first();
+        const backlogPlans = await env.ai_ceo_memory.prepare("SELECT COUNT(*) as cnt FROM content_plans cp WHERE NOT EXISTS (SELECT 1 FROM videos v WHERE v.content_plan_id = cp.id)").first();
+        const removedVideos = await env.ai_ceo_memory.prepare("SELECT COUNT(*) as cnt FROM removed_videos").first();
+        const latestStats = await env.ai_ceo_memory.prepare("SELECT subscriber_count, view_count, video_count, recorded_at FROM channel_stats ORDER BY id DESC LIMIT 1").first();
+        const todayUsage = await env.ai_ceo_memory.prepare("SELECT op_type, count FROM daily_usage WHERE usage_date = ?").bind(today).all();
+        const recentAlerts = await env.ai_ceo_memory.prepare("SELECT alert_type, message, created_at FROM system_alerts ORDER BY id DESC LIMIT 5").all();
+        const rotationStatus = await env.ai_ceo_memory.prepare("SELECT hour, last_used_at FROM publish_hour_rotation ORDER BY hour ASC").all();
+
+        return new Response(JSON.stringify({
+          published_videos: totalVideos?.cnt || 0,
+          videos_awaiting_publish: readyVideos?.cnt || 0,
+          unused_content_plans_backlog: backlogPlans?.cnt || 0,
+          videos_removed_for_moderation: removedVideos?.cnt || 0,
+          channel_stats: latestStats || null,
+          today_usage: todayUsage.results,
+          recent_alerts: recentAlerts.results,
+          publish_hour_rotation: rotationStatus.results
+        }, null, 2), {
+          headers: { "Content-Type": "application/json" }
+        });
+      } catch (statusErr) {
+        return new Response(JSON.stringify({ error: statusErr.message }), { status: 500, headers: { "Content-Type": "application/json" } });
+      }
+    }
+
     const result = await env.ai_ceo_memory.prepare(
       "SELECT * FROM trends ORDER BY id DESC LIMIT 10"
     ).all();
@@ -1433,6 +1463,7 @@ export default {
     }
   }
 };
+
 
 
 
