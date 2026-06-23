@@ -535,8 +535,13 @@ async function searchPexelsVideo(apiKey, query) {
   const video = data.videos[0];
   if (!video.image) return null;
 
+  const sdFile = (video.video_files || []).find(f => f.quality === "sd" && f.width && f.width <= 1080)
+    || (video.video_files || []).find(f => f.quality === "sd")
+    || (video.video_files || [])[0];
+
   return {
     previewImageUrl: video.image,
+    videoUrl: sdFile ? sdFile.link : null,
     photographer: video.user?.name || "Pexels"
   };
 }
@@ -1668,6 +1673,7 @@ export default {
                 frameUrls.push(`${downloadUrlBase}/file/ai-ceo-media/${frameFileName}?Authorization=${authToken}`);
               }
               sceneFrameUrls.push(frameUrls);
+              sceneVideoUrls.push(pexelsResult && pexelsResult.videoUrl ? pexelsResult.videoUrl : null);
             }
           } finally {
             await browser.close();
@@ -1724,6 +1730,7 @@ export default {
           console.log(`Calling Render to assemble video from frame sequences for content_plan_id=${contentPlanId}...`);
           const assembleResult = await callRenderAssembler({
             sceneFrameUrls: sceneFrameUrls,
+            sceneVideoUrls: sceneVideoUrls,
             audioUrl: audioDownloadUrl,
             b2KeyId: env.B2_KEY_ID,
             b2ApplicationKey: env.B2_APPLICATION_KEY,
@@ -1992,6 +1999,12 @@ export default {
     }
   }
 };
+
+
+
+
+
+
 
 
 
