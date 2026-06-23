@@ -307,6 +307,29 @@ Given this data (which may still be very early/limited), is the current trajecto
   return (aiResponse.response || "").trim();
 }
 
+async function selectTitleVariant(env) {
+  const variantCounts = await env.ai_ceo_memory.prepare(
+    "SELECT variant_text, COUNT(*) as cnt FROM prompt_variants WHERE variant_type = 'title_style' GROUP BY variant_text"
+  ).all();
+
+  const countMap = {};
+  for (const row of variantCounts.results) {
+    countMap[row.variant_text] = row.cnt;
+  }
+
+  let leastUsed = TITLE_STYLE_VARIANTS[0];
+  let leastCount = countMap[leastUsed.id] || 0;
+  for (const variant of TITLE_STYLE_VARIANTS) {
+    const count = countMap[variant.id] || 0;
+    if (count < leastCount) {
+      leastUsed = variant;
+      leastCount = count;
+    }
+  }
+
+  return leastUsed;
+}
+
 async function selectHookVariant(env) {
   const variantCounts = await env.ai_ceo_memory.prepare(
     "SELECT variant_text, COUNT(*) as cnt FROM prompt_variants WHERE variant_type = 'hook_intensity' GROUP BY variant_text"
@@ -794,6 +817,12 @@ function isEvergreenTopic(title) {
   const lower = title.toLowerCase();
   return EVERGREEN_KEYWORDS.some(keyword => lower.includes(keyword));
 }
+
+const TITLE_STYLE_VARIANTS = [
+  { id: "direct_claim", instruction: "Make the title a direct, confident claim or verdict about the topic - no question marks." },
+  { id: "question", instruction: "Make the title a pointed question that creates curiosity about your take." },
+  { id: "number_list", instruction: "Make the title reference a specific number or count if natural to the topic (e.g. a ranking, a count of reasons), otherwise default to a direct claim." }
+];
 
 const HOOK_INTENSITY_VARIANTS = [
   { id: "direct", instruction: "State your contrarian take immediately and plainly in the first sentence - no buildup." },
@@ -1413,6 +1442,7 @@ export default {
 
             const selectedStructure = SCRIPT_STRUCTURES[opp.id % SCRIPT_STRUCTURES.length];
             const selectedHookVariant = await selectHookVariant(env);
+            const selectedTitleVariant = await selectTitleVariant(env);
 
             const memoryNote = recentTitles
               ? `\n\nFor context, your recent videos covered: ${recentTitles}. If relevant, you may briefly reference one of these for continuity, but don't force it.`
@@ -1422,7 +1452,7 @@ export default {
               ? `\n\nFor reference, here are some currently high-performing video titles from similar commentary channels: ${competitorTitleExamples}. Use these only to understand what title styles and angles are resonating right now - do not copy them, write something original in your own voice.`
               : "";
 
-            const prompt = `${PERSONA}\n\nWrite a 20-25 second video script (just the spoken narration, no stage directions) about this trending topic: ${cleanTitle}.${memoryNote}${competitorNote}\n\nWrite this in a natural, conversational tone with appropriate punctuation for text-to-speech - use contractions, vary your rhythm, and write the way someone would actually speak out loud, not like formal writing.\n\n${selectedStructure}\n\nFor your HOOK specifically: ${selectedHookVariant.instruction}\n\nWriting style for text-to-speech: write the way you'd actually talk, not like an essay. Use short sentences. Use natural punctuation - commas, periods, dashes - to create pauses where you'd naturally pause speaking. Vary your sentence length: mix short punchy lines with slightly longer ones, the way real speech actually flows.\n\nAlso suggest a catchy, clickable video title under 60 characters that reflects your personality.\n\nFinally, describe 3 distinct visual scenes representing the subject matter, plus one SEPARATE thumbnail concept. For each scene, give: a single relevant emoji, and a short 3-5 word label phrase (not the title, never include literal words like "text" or "title"). For the thumbnail specifically, choose the single most dramatic, attention-grabbing emoji and phrase that captures the core hook of the video - this is what people see before clicking. Format your response exactly as:\nTITLE: <title>\nSCRIPT: <script>\nSCENE1_EMOJI: <emoji>\nSCENE1_LABEL: <short phrase>\nSCENE2_EMOJI: <emoji>\nSCENE2_LABEL: <short phrase>\nSCENE3_EMOJI: <emoji>\nSCENE3_LABEL: <short phrase>\nTHUMBNAIL_EMOJI: <emoji>\nTHUMBNAIL_LABEL: <short dramatic phrase>`;
+            const prompt = `${PERSONA}\n\nWrite a 20-25 second video script (just the spoken narration, no stage directions) about this trending topic: ${cleanTitle}.${memoryNote}${competitorNote}\n\nWrite this in a natural, conversational tone with appropriate punctuation for text-to-speech - use contractions, vary your rhythm, and write the way someone would actually speak out loud, not like formal writing.\n\n${selectedStructure}\n\nFor your HOOK specifically: ${selectedHookVariant.instruction}\n\nWriting style for text-to-speech: write the way you'd actually talk, not like an essay. Use short sentences. Use natural punctuation - commas, periods, dashes - to create pauses where you'd naturally pause speaking. Vary your sentence length: mix short punchy lines with slightly longer ones, the way real speech actually flows.\n\nAlso suggest a catchy, clickable video title under 60 characters that reflects your personality. For the TITLE specifically: ${selectedTitleVariant.instruction}\n\nFinally, describe 3 distinct visual scenes representing the subject matter, plus one SEPARATE thumbnail concept. For each scene, give: a single relevant emoji, and a short 3-5 word label phrase (not the title, never include literal words like "text" or "title"). For the thumbnail specifically, choose the single most dramatic, attention-grabbing emoji and phrase that captures the core hook of the video - this is what people see before clicking. Format your response exactly as:\nTITLE: <title>\nSCRIPT: <script>\nSCENE1_EMOJI: <emoji>\nSCENE1_LABEL: <short phrase>\nSCENE2_EMOJI: <emoji>\nSCENE2_LABEL: <short phrase>\nSCENE3_EMOJI: <emoji>\nSCENE3_LABEL: <short phrase>\nTHUMBNAIL_EMOJI: <emoji>\nTHUMBNAIL_LABEL: <short dramatic phrase>`;
 
             const aiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
               messages: [{ role: "user", content: prompt }]
@@ -1480,6 +1510,10 @@ export default {
               await env.ai_ceo_memory.prepare(
                 "INSERT INTO prompt_variants (variant_type, variant_text, content_plan_id) VALUES (?, ?, ?)"
               ).bind("hook_intensity", selectedHookVariant.id, contentPlanId).run();
+
+              await env.ai_ceo_memory.prepare(
+                "INSERT INTO prompt_variants (variant_type, variant_text, content_plan_id) VALUES (?, ?, ?)"
+              ).bind("title_style", selectedTitleVariant.id, contentPlanId).run();
             } catch (variantLogErr) {
               console.log("Non-fatal: failed to log prompt variant:", variantLogErr.message);
             }
@@ -1958,6 +1992,11 @@ export default {
     }
   }
 };
+
+
+
+
+
 
 
 
