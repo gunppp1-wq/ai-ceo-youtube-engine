@@ -1859,6 +1859,22 @@ export default {
               } catch (commentErr) {
                 console.log(`Non-fatal: comment fetch failed for video id=${pubVideo.id}:`, commentErr.message);
               }
+
+              try {
+                const hoursAge = (Date.now() - new Date(pubVideo.published_at + "Z").getTime()) / (1000 * 60 * 60);
+                const flagAlreadyExists = await env.ai_ceo_memory.prepare(
+                  "SELECT id FROM system_alerts WHERE alert_type = 'UNDERPERFORMING_24H' AND message LIKE ?"
+                ).bind(`%video id=${pubVideo.id}%`).first();
+
+                if (hoursAge >= 24 && hoursAge < 48 && !flagAlreadyExists && analytics.views < 10) {
+                  await env.ai_ceo_memory.prepare(
+                    "INSERT INTO system_alerts (alert_type, message) VALUES (?, ?)"
+                  ).bind("UNDERPERFORMING_24H", `video id=${pubVideo.id} has only ${analytics.views} views after ~24 hours - may be worth reviewing`).run();
+                  console.log(`Flagged video id=${pubVideo.id} as underperforming at 24h: ${analytics.views} views`);
+                }
+              } catch (flagErr) {
+                console.log(`Non-fatal: underperformance flag check failed for video id=${pubVideo.id}:`, flagErr.message);
+              }
             } catch (analyticsErr) {
               console.log(`Non-fatal: analytics fetch failed for video id=${pubVideo.id}:`, analyticsErr.message);
             }
@@ -1913,6 +1929,7 @@ export default {
     }
   }
 };
+
 
 
 
