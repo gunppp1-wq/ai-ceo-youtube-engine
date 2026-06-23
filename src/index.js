@@ -432,6 +432,27 @@ async function addVideoToPlaylist(accessToken, playlistId, videoId) {
   return await res.json();
 }
 
+async function getCurrentBranding(accessToken, channelId) {
+  const res = await fetch(`https://www.googleapis.com/youtube/v3/channels?part=brandingSettings&id=${channelId}`, {
+    headers: { Authorization: `Bearer ${accessToken}` }
+  });
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Get current branding failed: ${res.status} ${errBody}`);
+  }
+  const data = await res.json();
+  if (!data.items || !data.items[0]) throw new Error("No channel found for branding lookup");
+  return data.items[0].brandingSettings.channel || {};
+}
+
+async function generateKeywordsOnly(env) {
+  const prompt = `${PERSONA}\n\nGenerate 10-15 relevant search keywords/phrases (comma-separated) that describe this YouTube channel's content for search discovery (topics, genres, persona traits). Respond with only the comma-separated list, nothing else.`;
+  const aiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+    messages: [{ role: "user", content: prompt }]
+  });
+  return (aiResponse.response || "").trim().replace(/["`]/g, "").slice(0, 500);
+}
+
 async function getChannelStats(accessToken) {
   const res = await fetch("https://www.googleapis.com/youtube/v3/channels?part=statistics&mine=true", {
     headers: { Authorization: `Bearer ${accessToken}` }
@@ -998,6 +1019,32 @@ export default {
       const channelSetupDone = await env.ai_ceo_memory.prepare(
         "SELECT id FROM channel_setup LIMIT 1"
       ).first();
+
+      if (channelSetupDone) {
+        const keywordsBackfillDone = await env.ai_ceo_memory.prepare(
+          "SELECT id FROM keywords_backfill LIMIT 1"
+        ).first();
+
+        if (!keywordsBackfillDone) {
+          try {
+            console.log("Running one-time channel keywords backfill...");
+            const backfillAccessToken = await getYoutubeAccessToken(env);
+            const backfillChannelId = await getOwnChannelId(backfillAccessToken);
+            const currentBranding = await getCurrentBranding(backfillAccessToken, backfillChannelId);
+            const newKeywords = await generateKeywordsOnly(env);
+
+            await applyChannelBranding(backfillAccessToken, backfillChannelId, currentBranding.title, currentBranding.description, null, newKeywords);
+
+            await env.ai_ceo_memory.prepare(
+              "INSERT INTO keywords_backfill (id, completed_at) VALUES (1, datetime('now'))"
+            ).run();
+
+            console.log(`Channel keywords backfill complete: ${newKeywords}`);
+          } catch (backfillErr) {
+            console.log("Non-fatal: channel keywords backfill failed:", backfillErr.message);
+          }
+        }
+      }
 
       const setupAttemptsRow = await env.ai_ceo_memory.prepare(
         "SELECT attempts FROM channel_setup_attempts WHERE id = 1"
@@ -1677,6 +1724,9 @@ export default {
     }
   }
 };
+
+
+
 
 
 
