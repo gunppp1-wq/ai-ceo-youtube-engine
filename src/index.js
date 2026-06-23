@@ -1502,7 +1502,7 @@ export default {
       }
 
       const unusedPlansForAssets = await env.ai_ceo_memory.prepare(
-        "SELECT cp.id as content_plan_id, cp.title as generated_title, cp.script as generated_script, cp.metadata, o.id as opp_id, o.created_at as opp_created_at FROM content_plans cp JOIN opportunities o ON o.id = cp.opportunity_id WHERE NOT EXISTS (SELECT 1 FROM videos v WHERE v.content_plan_id = cp.id) ORDER BY cp.id ASC LIMIT 3"
+        "SELECT cp.id as content_plan_id, cp.title as generated_title, cp.script as generated_script, cp.metadata, o.id as opp_id, o.created_at as opp_created_at FROM content_plans cp JOIN opportunities o ON o.id = cp.opportunity_id WHERE NOT EXISTS (SELECT 1 FROM videos v WHERE v.content_plan_id = cp.id) ORDER BY cp.id ASC LIMIT 1"
       ).all();
 
       for (const planRow of unusedPlansForAssets.results) {
@@ -1958,6 +1958,7 @@ export default {
     }
   }
 };
+
 
 
 
