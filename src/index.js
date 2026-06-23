@@ -628,10 +628,10 @@ function passesEconomicsGate(opp, generatedScript) {
 }
 
 const CATEGORY_KEYWORDS = {
-  "20": ["game", "gaming", "gameplay", "esports", "playstation", "xbox", "nintendo", "steam", "fortnite", "minecraft", "valorant"],
-  "10": ["music", "song", "album", "official video", "lyric", "rapper", "concert", "remix"],
-  "1": ["movie", "trailer", "film", "actor", "actress", "box office", "cinema"],
-  "24": ["show", "series", "episode", "drama", "celebrity", "tv"]
+  "20": ["game", "gaming", "gameplay", "esports", "playstation", "xbox", "nintendo", "steam", "fortnite", "minecraft", "valorant", "ps5", "rpg", "fps", "speedrun", "dlc", "patch notes", "league of legends", "call of duty", "roblox"],
+  "10": ["music", "song", "album", "official video", "lyric", "rapper", "concert", "remix", "singer", "band", "tour", "spotify", "billboard", "grammy"],
+  "1": ["movie", "trailer", "film", "actor", "actress", "box office", "cinema", "director", "sequel", "prequel", "marvel", "dc comics", "blockbuster", "anime", "manga", "animated", "animation", "studio ghibli"],
+  "24": ["show", "series", "episode", "drama", "celebrity", "tv", "reality tv", "talk show", "interview"]
 };
 
 function detectVideoCategory(title) {
@@ -652,7 +652,11 @@ function generateTags(title) {
 
 const EVERGREEN_KEYWORDS = [
   "explained", "lore", "history of", "origin of", "every", "ranked", "tier list",
-  "strongest", "weakest", "all characters", "timeline", "guide", "evolution of"
+  "strongest", "weakest", "all characters", "timeline", "guide", "evolution of",
+  "biggest", "best", "worst", "top 10", "top 5", "complete guide", "everything you need to know",
+  "true story", "real story", "backstory", "deep dive", "breakdown", "analysis",
+  "secrets", "facts", "theory", "theories", "mystery", "mysteries", "hidden details",
+  "what happened to", "whatever happened", "untold story", "forgotten", "underrated"
 ];
 
 function isEvergreenTopic(title) {
@@ -1724,6 +1728,9 @@ export default {
     }
   }
 };
+
+
+
 
 
 
