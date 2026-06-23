@@ -258,6 +258,19 @@ async function reasonTopicSelection(env, candidates, recentTitles) {
   if (candidates.length === 0) return null;
   if (candidates.length === 1) return candidates[0];
 
+  let pastReasoningNote = "";
+  try {
+    const pastHistory = await env.ai_ceo_memory.prepare(
+      "SELECT chosen_value, reasoning FROM reasoning_history WHERE decision_type = 'topic_selection' ORDER BY id DESC LIMIT 5"
+    ).all();
+    if (pastHistory.results.length > 0) {
+      const historyList = pastHistory.results.map(h => `- Chose "${h.chosen_value}" because: ${h.reasoning}`).join("\n");
+      pastReasoningNote = `\n\nYour past reasoning on similar decisions (for context, learn from your own patterns):\n${historyList}`;
+    }
+  } catch (historyFetchErr) {
+    console.log("Non-fatal: could not fetch reasoning history:", historyFetchErr.message);
+  }
+
   const candidateList = candidates.map((c, i) => `${i + 1}. "${c.title}" (profit_score: ${c.profit_score.toFixed(0)}, status: ${c.status})`).join("\n");
 
   const reasoningPrompt = `You are the decision-making layer for an automated YouTube commentary channel ("The Skeptical Fan" persona). You must choose ONE topic from the candidates below to produce a video about today.
@@ -271,7 +284,7 @@ Standing rules you MUST follow:
 Candidates (already pre-filtered for basic eligibility, ranked by a simple view-based score):
 ${candidateList}
 
-Recent videos covered: ${recentTitles || "none yet"}
+Recent videos covered: ${recentTitles || "none yet"}${pastReasoningNote}
 
 Pick the single best candidate by NUMBER, and explain your reasoning in 1-2 sentences. Format exactly as:
 CHOICE: <number>
@@ -1259,6 +1272,14 @@ export default {
         reasonedChoice = await reasonTopicSelection(env, candidateOpportunities.results, recentTitles);
         if (reasonedChoice) {
           console.log(`AI topic reasoning chose: "${reasonedChoice.title}" - ${reasonedChoice._reasoning || "no reasoning logged"}`);
+
+          try {
+            await env.ai_ceo_memory.prepare(
+              "INSERT INTO reasoning_history (opportunity_id, decision_type, chosen_value, reasoning) VALUES (?, ?, ?, ?)"
+            ).bind(reasonedChoice.id, "topic_selection", reasonedChoice.title, reasonedChoice._reasoning || "").run();
+          } catch (historyErr) {
+            console.log("Non-fatal: failed to log reasoning history:", historyErr.message);
+          }
         }
       } catch (reasoningErr) {
         console.log("Non-fatal: topic reasoning failed, falling back to top-scored candidate:", reasoningErr.message);
@@ -1779,6 +1800,9 @@ export default {
     }
   }
 };
+
+
+
 
 
 
