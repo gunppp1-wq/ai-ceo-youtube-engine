@@ -254,6 +254,44 @@ async function setYoutubeThumbnail(accessToken, videoId, thumbnailBytes) {
   return await res.json();
 }
 
+async function reasonTopicSelection(env, candidates, recentTitles) {
+  if (candidates.length === 0) return null;
+  if (candidates.length === 1) return candidates[0];
+
+  const candidateList = candidates.map((c, i) => `${i + 1}. "${c.title}" (profit_score: ${c.profit_score.toFixed(0)}, status: ${c.status})`).join("\n");
+
+  const reasoningPrompt = `You are the decision-making layer for an automated YouTube commentary channel ("The Skeptical Fan" persona). You must choose ONE topic from the candidates below to produce a video about today.
+
+Standing rules you MUST follow:
+- Never choose anything involving real-world violence, hate, self-harm, child safety risks, or illegal activity (these are already filtered out, but use judgment on borderline cases)
+- Prefer topics that are durable/evergreen and could support real audience value over purely disposable trending noise, when the difference is meaningful
+- Consider the channel's recent history below to avoid repetitive or stale coverage
+- Your job is to maximize long-term channel growth and profit potential, not just raw view count
+
+Candidates (already pre-filtered for basic eligibility, ranked by a simple view-based score):
+${candidateList}
+
+Recent videos covered: ${recentTitles || "none yet"}
+
+Pick the single best candidate by NUMBER, and explain your reasoning in 1-2 sentences. Format exactly as:
+CHOICE: <number>
+REASONING: <your reasoning>`;
+
+  const aiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+    messages: [{ role: "user", content: reasoningPrompt }]
+  });
+
+  const responseText = aiResponse.response || "";
+  const choiceMatch = responseText.match(/CHOICE:\s*(\d+)/i);
+  const reasoningMatch = responseText.match(/REASONING:\s*(.+)/i);
+
+  const chosenIndex = choiceMatch ? parseInt(choiceMatch[1], 10) - 1 : 0;
+  const reasoning = reasoningMatch ? reasoningMatch[1].trim() : "No reasoning provided";
+
+  const chosen = candidates[chosenIndex] || candidates[0];
+  return { ...chosen, _reasoning: reasoning };
+}
+
 async function critiqueScriptOriginality(env, script, title) {
   const critiquePrompt = `You are a strict, skeptical content critic reviewing a YouTube Shorts script BEFORE it gets published. Your job is to catch generic, templated, or low-effort writing that would feel like "AI slop" to a real viewer.
 
@@ -1193,8 +1231,8 @@ export default {
         }
       }
 
-      const topOpportunities = await env.ai_ceo_memory.prepare(
-        "SELECT * FROM opportunities WHERE status IN ('ready', 'needs_commentary_angle') ORDER BY profit_score DESC LIMIT 1"
+      const candidateOpportunities = await env.ai_ceo_memory.prepare(
+        "SELECT * FROM opportunities WHERE status IN ('ready', 'needs_commentary_angle') ORDER BY profit_score DESC LIMIT 5"
       ).all();
 
       const recentPlans = await env.ai_ceo_memory.prepare(
@@ -1216,7 +1254,20 @@ export default {
       if (unusedPlanCount >= MAX_CONTENT_BACKLOG) {
         console.log(`Skipping new content generation: ${unusedPlanCount} unused content plans already in backlog (max ${MAX_CONTENT_BACKLOG}). Letting asset generation catch up first.`);
       } else {
-      for (const opp of topOpportunities.results) {
+      let reasonedChoice = null;
+      try {
+        reasonedChoice = await reasonTopicSelection(env, candidateOpportunities.results, recentTitles);
+        if (reasonedChoice) {
+          console.log(`AI topic reasoning chose: "${reasonedChoice.title}" - ${reasonedChoice._reasoning || "no reasoning logged"}`);
+        }
+      } catch (reasoningErr) {
+        console.log("Non-fatal: topic reasoning failed, falling back to top-scored candidate:", reasoningErr.message);
+        reasonedChoice = candidateOpportunities.results[0] || null;
+      }
+
+      const selectedOpportunities = reasonedChoice ? [reasonedChoice] : [];
+
+      for (const opp of selectedOpportunities) {
         let success = false;
         let generatedTitle, generatedScript, contentPlanId, sceneDescriptions, thumbnailDescription;
 
@@ -1728,6 +1779,10 @@ export default {
     }
   }
 };
+
+
+
+
 
 
 
