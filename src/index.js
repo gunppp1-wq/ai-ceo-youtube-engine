@@ -388,6 +388,47 @@ async function searchPexelsVideo(apiKey, query) {
   };
 }
 
+async function createPlaylist(accessToken, title, description) {
+  const res = await fetch("https://www.googleapis.com/youtube/v3/playlists?part=snippet,status", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      snippet: { title: title.slice(0, 150), description: description.slice(0, 5000) },
+      status: { privacyStatus: "public" }
+    })
+  });
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Create playlist failed: ${res.status} ${errBody}`);
+  }
+  const data = await res.json();
+  return data.id;
+}
+
+async function addVideoToPlaylist(accessToken, playlistId, videoId) {
+  const res = await fetch("https://www.googleapis.com/youtube/v3/playlistItems?part=snippet", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      snippet: {
+        playlistId: playlistId,
+        resourceId: { kind: "youtube#video", videoId: videoId }
+      }
+    })
+  });
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Add to playlist failed: ${res.status} ${errBody}`);
+  }
+  return await res.json();
+}
+
 async function getChannelStats(accessToken) {
   const res = await fetch("https://www.googleapis.com/youtube/v3/channels?part=statistics&mine=true", {
     headers: { Authorization: `Bearer ${accessToken}` }
@@ -990,6 +1031,16 @@ export default {
           ).run();
 
           console.log(`Channel identity setup complete: "${identity.name}"`);
+
+          try {
+            const playlistId = await createPlaylist(accessToken, `${identity.name} - All Videos`, "All videos from this channel, organized in one place.");
+            await env.ai_ceo_memory.prepare(
+              "INSERT INTO channel_playlist (id, playlist_id) VALUES (1, ?)"
+            ).bind(playlistId).run();
+            console.log(`Created channel playlist: ${playlistId}`);
+          } catch (playlistErr) {
+            console.log("Non-fatal: playlist creation failed:", playlistErr.message);
+          }
         } catch (setupErr) {
           console.log("ERROR during channel identity setup:", setupErr.message);
 
@@ -1501,6 +1552,16 @@ export default {
             console.log(`Marked hour ${video.target_publish_hour} as used in rotation`);
           }
 
+          try {
+            const playlistRow = await env.ai_ceo_memory.prepare("SELECT playlist_id FROM channel_playlist WHERE id = 1").first();
+            if (playlistRow && playlistRow.playlist_id) {
+              await addVideoToPlaylist(accessToken, playlistRow.playlist_id, youtubeVideoId);
+              console.log(`Added video id=${video.id} to channel playlist`);
+            }
+          } catch (playlistAddErr) {
+            console.log(`Non-fatal: failed to add video id=${video.id} to playlist:`, playlistAddErr.message);
+          }
+
           if (video.b2_file_ids) {
             try {
               const fileIds = JSON.parse(video.b2_file_ids);
@@ -1613,6 +1674,9 @@ export default {
     }
   }
 };
+
+
+
 
 
 
