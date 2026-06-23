@@ -1108,6 +1108,46 @@ export default {
       }
     }
 
+    if (url.pathname === "/sponsor-kit") {
+      try {
+        const latestStats = await env.ai_ceo_memory.prepare(
+          "SELECT subscriber_count, view_count, video_count, recorded_at FROM channel_stats ORDER BY id DESC LIMIT 1"
+        ).first();
+
+        const totalWatchTime = await env.ai_ceo_memory.prepare("SELECT SUM(watch_time_minutes) as total_minutes FROM video_performance").first();
+
+        const topVideo = await env.ai_ceo_memory.prepare(
+          "SELECT v.youtube_video_id, cp.title, vp.views, vp.likes, vp.comments FROM video_performance vp JOIN videos v ON v.id = vp.video_id JOIN content_plans cp ON cp.id = v.content_plan_id ORDER BY vp.views DESC LIMIT 1"
+        ).first();
+
+        const avgEngagement = await env.ai_ceo_memory.prepare(
+          "SELECT AVG(views) as avg_views, AVG(likes) as avg_likes, AVG(comments) as avg_comments FROM video_performance"
+        ).first();
+
+        const totalPublished = await env.ai_ceo_memory.prepare("SELECT COUNT(*) as cnt FROM videos WHERE status = 'published'").first();
+
+        return new Response(JSON.stringify({
+          channel_name: "pop jack",
+          channel_handle: "@popjack-l7y",
+          niche: "Pop culture, gaming, and music commentary - the skeptical-but-passionate fan perspective",
+          subscriber_count: latestStats?.subscriber_count || 0,
+          total_channel_views: latestStats?.view_count || 0,
+          total_videos_published: totalPublished?.cnt || 0,
+          total_watch_time_hours: totalWatchTime?.total_minutes ? (totalWatchTime.total_minutes / 60).toFixed(1) : "0.0",
+          average_views_per_video: avgEngagement?.avg_views ? Math.round(avgEngagement.avg_views) : 0,
+          average_likes_per_video: avgEngagement?.avg_likes ? Math.round(avgEngagement.avg_likes) : 0,
+          average_comments_per_video: avgEngagement?.avg_comments ? Math.round(avgEngagement.avg_comments) : 0,
+          top_performing_video: topVideo ? { title: topVideo.title, url: `https://youtube.com/watch?v=${topVideo.youtube_video_id}`, views: topVideo.views, likes: topVideo.likes, comments: topVideo.comments } : null,
+          stats_as_of: latestStats?.recorded_at || null,
+          note: "All figures are real, automatically-tracked channel statistics."
+        }, null, 2), {
+          headers: { "Content-Type": "application/json" }
+        });
+      } catch (sponsorKitErr) {
+        return new Response(JSON.stringify({ error: sponsorKitErr.message }), { status: 500, headers: { "Content-Type": "application/json" } });
+      }
+    }
+
     const result = await env.ai_ceo_memory.prepare(
       "SELECT * FROM trends ORDER BY id DESC LIMIT 10"
     ).all();
@@ -1929,6 +1969,9 @@ export default {
     }
   }
 };
+
+
+
 
 
 
