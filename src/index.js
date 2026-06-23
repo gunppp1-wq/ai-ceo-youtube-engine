@@ -1185,8 +1185,13 @@ export default {
             continue;
           }
 
-          const ttsResp = await env.AI.run("@cf/deepgram/aura-1", {
-            text: generatedScript
+          const AURA2_VOICES = ["luna", "asteria", "athena", "hera", "aurora", "iris", "thalia", "orion", "apollo", "atlas"];
+          const selectedVoice = AURA2_VOICES[contentPlanId % AURA2_VOICES.length];
+          console.log(`Using voice: ${selectedVoice} for content_plan_id=${contentPlanId}`);
+
+          const ttsResp = await env.AI.run("@cf/deepgram/aura-2-en", {
+            text: generatedScript,
+            speaker: selectedVoice
           }, { returnRawResponse: true });
 
           const audioArrayBuffer = await ttsResp.arrayBuffer();
@@ -1546,6 +1551,7 @@ export default {
     }
   }
 };
+
 
 
 
