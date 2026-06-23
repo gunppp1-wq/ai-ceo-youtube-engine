@@ -284,7 +284,7 @@ REASON: <one sentence explaining your verdict>`;
 }
 
 async function generateChannelIdentity(env) {
-  const prompt = `${PERSONA}\n\nYou need to design the YouTube channel identity for this persona. Generate:\n1. A catchy channel NAME under 30 characters that reflects this skeptical-but-passionate commentator persona (not generic, memorable, fits a trending pop-culture/gaming/music commentary channel)\n2. A channel DESCRIPTION under 800 characters that tells potential subscribers what to expect, written in the persona voice\n3. A BANNER_PROMPT - a short visual description (for an AI image generator) for a YouTube channel banner background that fits this persona and content (dramatic, eye-catching, NOT containing any text/words/logos)\n\nFormat exactly as:\nNAME: <name>\nDESCRIPTION: <description>\nBANNER_PROMPT: <prompt>`;
+  const prompt = `${PERSONA}\n\nYou need to design the YouTube channel identity for this persona. Generate:\n1. A catchy channel NAME under 30 characters that reflects this skeptical-but-passionate commentator persona (not generic, memorable, fits a trending pop-culture/gaming/music commentary channel)\n2. A channel DESCRIPTION under 800 characters that tells potential subscribers what to expect, written in the persona voice\n3. A BANNER_PROMPT - a short visual description (for an AI image generator) for a YouTube channel banner background that fits this persona and content (dramatic, eye-catching, NOT containing any text/words/logos)\n4. KEYWORDS - 10-15 relevant search keywords/phrases (comma-separated) that describe this channel's content for YouTube search discovery (e.g. topics, genres, persona traits)\n\nFormat exactly as:\nNAME: <name>\nDESCRIPTION: <description>\nBANNER_PROMPT: <prompt>\nKEYWORDS: <keyword1, keyword2, keyword3, ...>`;
 
   const aiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
     messages: [{ role: "user", content: prompt }]
@@ -294,6 +294,7 @@ async function generateChannelIdentity(env) {
   const nameMatch = responseText.match(/NAME:\s*(.+)/i);
   const descMatch = responseText.match(/DESCRIPTION:\s*([\s\S]+?)(?=BANNER_PROMPT:|$)/i);
   const bannerMatch = responseText.match(/BANNER_PROMPT:\s*(.+)/i);
+  const keywordsMatch = responseText.match(/KEYWORDS:\s*(.+)/i);
 
   const cleanName = nameMatch ? nameMatch[1].trim().replace(/["`]/g, "").replace(/\s+/g, " ").slice(0, 30).trim() : "";
   const cleanDescription = descMatch ? descMatch[1].trim().replace(/["`]/g, "").slice(0, 800).trim() : "";
@@ -301,7 +302,8 @@ async function generateChannelIdentity(env) {
   return {
     name: (cleanName.length >= 3) ? cleanName : "The Skeptical Fan",
     description: (cleanDescription.length >= 10) ? cleanDescription : "Calling out the hype, one trend at a time.",
-    bannerPrompt: bannerMatch ? bannerMatch[1].trim().replace(/["`]/g, "") : "dramatic dark cinematic background, bold colors"
+    bannerPrompt: bannerMatch ? bannerMatch[1].trim().replace(/["`]/g, "") : "dramatic dark cinematic background, bold colors",
+    keywords: keywordsMatch ? keywordsMatch[1].trim().replace(/["`]/g, "") : ""
   };
 }
 
@@ -323,13 +325,14 @@ async function uploadChannelBanner(accessToken, bannerBytes) {
   return await res.json();
 }
 
-async function applyChannelBranding(accessToken, channelId, title, description, bannerUrl) {
+async function applyChannelBranding(accessToken, channelId, title, description, bannerUrl, keywords) {
   const body = {
     id: channelId,
     brandingSettings: {
       channel: {
         title: title,
-        description: description
+        description: description,
+        keywords: keywords || ""
       }
     }
   };
@@ -1024,7 +1027,7 @@ export default {
             console.log("Non-fatal: banner generation/upload failed:", bannerErr.message);
           }
 
-          await applyChannelBranding(accessToken, channelId, identity.name, identity.description, bannerUrl);
+          await applyChannelBranding(accessToken, channelId, identity.name, identity.description, bannerUrl, identity.keywords);
 
           await env.ai_ceo_memory.prepare(
             "INSERT INTO channel_setup (completed_at) VALUES (datetime('now'))"
@@ -1674,6 +1677,11 @@ export default {
     }
   }
 };
+
+
+
+
+
 
 
 
