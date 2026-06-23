@@ -1282,12 +1282,37 @@ export default {
           }
 
           console.log(`Generating dedicated thumbnail for content_plan_id=${contentPlanId}...`);
-          const thumbnailPrompt = `${thumbnailDescription.label}, dramatic high-contrast lighting, single clear focal point, rule of thirds composition, vibrant saturated colors, professional photography style, eye-catching`;
-          const thumbResp = await env.AI.run("@cf/black-forest-labs/flux-1-schnell", {
-            prompt: thumbnailPrompt
-          });
-          const thumbBinaryString = atob(thumbResp.image);
-          const thumbBytes = Uint8Array.from(thumbBinaryString, (m) => m.codePointAt(0));
+
+          let thumbBytes;
+          let thumbPexelsResult = null;
+          if (env.PEXELS_API_KEY) {
+            try {
+              thumbPexelsResult = await searchPexelsVideo(env.PEXELS_API_KEY, thumbnailDescription.label);
+            } catch (thumbPexelsErr) {
+              console.log(`Non-fatal: Pexels thumbnail search failed:`, thumbPexelsErr.message);
+            }
+          }
+
+          if (thumbPexelsResult) {
+            try {
+              const thumbPexelsBase64 = await fetchImageAsBase64(thumbPexelsResult.previewImageUrl);
+              const thumbPexelsBinary = atob(thumbPexelsBase64);
+              thumbBytes = Uint8Array.from(thumbPexelsBinary, (m) => m.codePointAt(0));
+              console.log(`Thumbnail using Pexels photo by ${thumbPexelsResult.photographer}`);
+            } catch (thumbPexelsImgErr) {
+              console.log(`Non-fatal: Pexels thumbnail image processing failed, falling back to AI generation:`, thumbPexelsImgErr.message);
+              thumbBytes = null;
+            }
+          }
+
+          if (!thumbBytes) {
+            const thumbnailPrompt = `${thumbnailDescription.label}, dramatic high-contrast lighting, single clear focal point, rule of thirds composition, vibrant saturated colors, professional photography style, eye-catching`;
+            const thumbResp = await env.AI.run("@cf/black-forest-labs/flux-1-schnell", {
+              prompt: thumbnailPrompt
+            });
+            const thumbBinaryString = atob(thumbResp.image);
+            thumbBytes = Uint8Array.from(thumbBinaryString, (m) => m.codePointAt(0));
+          }
 
           const thumbUploadUrlData = await b2GetUploadUrl(apiUrl, authToken, env.B2_BUCKET_ID);
           const thumbnailFileName = `thumbnails/content_plan_${contentPlanId}_thumb.jpg`;
@@ -1521,6 +1546,7 @@ export default {
     }
   }
 };
+
 
 
 
