@@ -254,6 +254,58 @@ async function setYoutubeThumbnail(accessToken, videoId, thumbnailBytes) {
   return await res.json();
 }
 
+async function assessMonetizationTrajectory(env) {
+  const statsHistory = await env.ai_ceo_memory.prepare(
+    "SELECT subscriber_count, recorded_at FROM channel_stats ORDER BY id ASC"
+  ).all();
+
+  if (statsHistory.results.length < 2) {
+    return { hasEnoughData: false };
+  }
+
+  const oldest = statsHistory.results[0];
+  const newest = statsHistory.results[statsHistory.results.length - 1];
+  const daysElapsed = (new Date(newest.recorded_at + "Z").getTime() - new Date(oldest.recorded_at + "Z").getTime()) / (1000 * 60 * 60 * 24);
+  const subsGained = newest.subscriber_count - oldest.subscriber_count;
+  const subsPerDay = daysElapsed > 0 ? subsGained / daysElapsed : 0;
+
+  const watchTimeTotal = await env.ai_ceo_memory.prepare("SELECT SUM(watch_time_minutes) as total_minutes FROM video_performance").first();
+  const totalWatchHours = watchTimeTotal?.total_minutes ? (watchTimeTotal.total_minutes / 60) : 0;
+
+  const subsNeeded = Math.max(0, 1000 - newest.subscriber_count);
+  const daysToSubsThreshold = subsPerDay > 0 ? Math.ceil(subsNeeded / subsPerDay) : null;
+
+  return {
+    hasEnoughData: true,
+    currentSubscribers: newest.subscriber_count,
+    subsPerDay: subsPerDay,
+    totalWatchHours: totalWatchHours,
+    daysToSubsThreshold: daysToSubsThreshold,
+    daysElapsed: daysElapsed
+  };
+}
+
+async function reasonAboutStrategy(env, trajectory) {
+  const strategyPrompt = `You are the strategic self-assessment layer for an automated YouTube commentary channel. Review your own growth trajectory and decide if any strategic change is warranted.
+
+Current trajectory:
+- Subscribers: ${trajectory.currentSubscribers} (need 1000 for monetization)
+- Growth rate: ${trajectory.subsPerDay.toFixed(2)} subscribers/day
+- Total watch hours: ${trajectory.totalWatchHours.toFixed(1)} (need 4000 for monetization)
+- Projected days to subscriber threshold: ${trajectory.daysToSubsThreshold || "unknown (no growth yet)"}
+- Days of data so far: ${trajectory.daysElapsed.toFixed(1)}
+
+Standing rules: you may only recommend changes within existing approved capabilities (topic selection, content style, posting frequency/timing) - you cannot recommend new payment methods, new legal/financial setups, or anything requiring human identity verification.
+
+Given this data (which may still be very early/limited), is the current trajectory concerning enough to warrant a strategic note, or is it too early to draw conclusions? Respond in 1-3 sentences with your honest assessment and any recommendation.`;
+
+  const aiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+    messages: [{ role: "user", content: strategyPrompt }]
+  });
+
+  return (aiResponse.response || "").trim();
+}
+
 async function reasonTopicSelection(env, candidates, recentTitles) {
   if (candidates.length === 0) return null;
   if (candidates.length === 1) return candidates[0];
@@ -1012,6 +1064,12 @@ export default {
           watch_hours: { current: totalWatchHours.toFixed(1), needed: 4000, percent: Math.min(100, (totalWatchHours / 4000) * 100).toFixed(1) },
           eligible: currentSubs >= 1000 && totalWatchHours >= 4000
         };
+
+        const latestStrategyRow = await env.ai_ceo_memory.prepare(
+          "SELECT chosen_value, reasoning, created_at FROM reasoning_history WHERE decision_type = 'strategy_assessment' ORDER BY id DESC LIMIT 1"
+        ).first();
+        const latestStrategyAssessment = latestStrategyRow ? { metrics: latestStrategyRow.chosen_value, assessment: latestStrategyRow.reasoning, at: latestStrategyRow.created_at } : null;
+
         const todayUsage = await env.ai_ceo_memory.prepare("SELECT op_type, count FROM daily_usage WHERE usage_date = ?").bind(today).all();
         const recentAlerts = await env.ai_ceo_memory.prepare("SELECT alert_type, message, created_at FROM system_alerts ORDER BY id DESC LIMIT 5").all();
         const rotationStatus = await env.ai_ceo_memory.prepare("SELECT hour, last_used_at FROM publish_hour_rotation ORDER BY hour ASC").all();
@@ -1023,6 +1081,7 @@ export default {
           videos_removed_for_moderation: removedVideos?.cnt || 0,
           channel_stats: latestStats || null,
           monetization_progress: monetizationProgress,
+          latest_strategy_assessment: latestStrategyAssessment || null,
           today_usage: todayUsage.results,
           recent_alerts: recentAlerts.results,
           publish_hour_rotation: rotationStatus.results
@@ -1789,6 +1848,22 @@ export default {
           ).bind(today, "channel_stats_check").run();
 
           console.log(`Channel stats recorded: ${channelStats.subscriberCount} subscribers, ${channelStats.viewCount} views, ${channelStats.videoCount} videos`);
+
+          try {
+            const trajectory = await assessMonetizationTrajectory(env);
+            if (trajectory.hasEnoughData) {
+              const assessment = await reasonAboutStrategy(env, trajectory);
+              console.log(`Strategy self-assessment: ${assessment}`);
+
+              await env.ai_ceo_memory.prepare(
+                "INSERT INTO reasoning_history (decision_type, chosen_value, reasoning) VALUES (?, ?, ?)"
+              ).bind("strategy_assessment", `${trajectory.currentSubscribers} subs, ${trajectory.subsPerDay.toFixed(2)}/day`, assessment).run();
+            } else {
+              console.log("Not enough historical data yet for strategy self-assessment");
+            }
+          } catch (trajectoryErr) {
+            console.log("Non-fatal: strategy self-assessment failed:", trajectoryErr.message);
+          }
         }
       } catch (statsErr) {
         console.log("Non-fatal: channel stats fetch failed:", statsErr.message);
@@ -1800,6 +1875,11 @@ export default {
     }
   }
 };
+
+
+
+
+
 
 
 
