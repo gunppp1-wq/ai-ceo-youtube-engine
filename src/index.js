@@ -580,6 +580,32 @@ async function generateKeywordsOnly(env) {
   return (aiResponse.response || "").trim().replace(/["`]/g, "").slice(0, 500);
 }
 
+async function fetchVideoComments(accessToken, videoId) {
+  const res = await fetch(`https://www.googleapis.com/youtube/v3/commentThreads?part=snippet&videoId=${videoId}&maxResults=20&order=relevance`, {
+    headers: { Authorization: `Bearer ${accessToken}` }
+  });
+  if (!res.ok) {
+    if (res.status === 403) {
+      return [];
+    }
+    const errBody = await res.text();
+    throw new Error(`Fetch comments failed: ${res.status} ${errBody}`);
+  }
+  const data = await res.json();
+  if (!data.items) return [];
+
+  return data.items.map(item => {
+    const snippet = item.snippet.topLevelComment.snippet;
+    return {
+      commentId: item.snippet.topLevelComment.id,
+      author: snippet.authorDisplayName,
+      text: snippet.textDisplay,
+      likeCount: snippet.likeCount,
+      publishedAt: snippet.publishedAt
+    };
+  });
+}
+
 async function getChannelStats(accessToken) {
   const res = await fetch("https://www.googleapis.com/youtube/v3/channels?part=statistics&mine=true", {
     headers: { Authorization: `Bearer ${accessToken}` }
@@ -1054,6 +1080,10 @@ export default {
         ).first();
         const latestStrategyAssessment = latestStrategyRow ? { metrics: latestStrategyRow.chosen_value, assessment: latestStrategyRow.reasoning, at: latestStrategyRow.created_at } : null;
 
+        const recentComments = await env.ai_ceo_memory.prepare(
+          "SELECT youtube_video_id, author, text, like_count FROM video_comments ORDER BY id DESC LIMIT 10"
+        ).all();
+
         const todayUsage = await env.ai_ceo_memory.prepare("SELECT op_type, count FROM daily_usage WHERE usage_date = ?").bind(today).all();
         const recentAlerts = await env.ai_ceo_memory.prepare("SELECT alert_type, message, created_at FROM system_alerts ORDER BY id DESC LIMIT 5").all();
         const rotationStatus = await env.ai_ceo_memory.prepare("SELECT hour, last_used_at FROM publish_hour_rotation ORDER BY hour ASC").all();
@@ -1066,6 +1096,7 @@ export default {
           channel_stats: latestStats || null,
           monetization_progress: monetizationProgress,
           latest_strategy_assessment: latestStrategyAssessment || null,
+          recent_comments: recentComments.results,
           today_usage: todayUsage.results,
           recent_alerts: recentAlerts.results,
           publish_hour_rotation: rotationStatus.results
@@ -1814,6 +1845,20 @@ export default {
               ).bind(pubVideo.id, analytics.views, analytics.watchTimeMinutes, analytics.averageViewDuration, analytics.likes, analytics.comments).run();
 
               console.log(`Analytics recorded for video id=${pubVideo.id}: ${analytics.views} views, ${analytics.watchTimeMinutes} min watched`);
+
+              try {
+                const freshComments = await fetchVideoComments(modAccessToken, pubVideo.youtube_video_id);
+                for (const comment of freshComments) {
+                  await env.ai_ceo_memory.prepare(
+                    "INSERT OR IGNORE INTO video_comments (youtube_video_id, comment_id, author, text, like_count, published_at) VALUES (?, ?, ?, ?, ?, ?)"
+                  ).bind(pubVideo.youtube_video_id, comment.commentId, comment.author, comment.text, comment.likeCount, comment.publishedAt).run();
+                }
+                if (freshComments.length > 0) {
+                  console.log(`Fetched ${freshComments.length} comments for video id=${pubVideo.id}`);
+                }
+              } catch (commentErr) {
+                console.log(`Non-fatal: comment fetch failed for video id=${pubVideo.id}:`, commentErr.message);
+              }
             } catch (analyticsErr) {
               console.log(`Non-fatal: analytics fetch failed for video id=${pubVideo.id}:`, analyticsErr.message);
             }
@@ -1868,6 +1913,10 @@ export default {
     }
   }
 };
+
+
+
+
 
 
 
