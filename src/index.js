@@ -325,6 +325,40 @@ async function applyChannelBranding(accessToken, channelId, title, description, 
   return await res.json();
 }
 
+async function fetchImageAsBase64(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Failed to fetch image: ${res.status}`);
+  const buffer = await res.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+async function searchPexelsVideo(apiKey, query) {
+  const res = await fetch(`https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&orientation=portrait&per_page=5`, {
+    headers: { Authorization: apiKey }
+  });
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Pexels search failed: ${res.status} ${errBody}`);
+  }
+  const data = await res.json();
+  if (!data.videos || data.videos.length === 0) {
+    return null;
+  }
+
+  const video = data.videos[0];
+  if (!video.image) return null;
+
+  return {
+    previewImageUrl: video.image,
+    photographer: video.user?.name || "Pexels"
+  };
+}
+
 async function getChannelStats(accessToken) {
   const res = await fetch("https://www.googleapis.com/youtube/v3/channels?part=statistics&mine=true", {
     headers: { Authorization: `Bearer ${accessToken}` }
@@ -1174,9 +1208,33 @@ export default {
             for (let sceneIdx = 0; sceneIdx < sceneDescriptions.length; sceneIdx++) {
               const motionType = MOTION_TYPES[(contentPlanId + sceneIdx) % MOTION_TYPES.length];
 
-              const canProceedSceneImage = await checkNeuronBudget(env, "image_generation");
               let frames;
-              if (canProceedSceneImage) {
+              let pexelsResult = null;
+              if (env.PEXELS_API_KEY) {
+                try {
+                  pexelsResult = await searchPexelsVideo(env.PEXELS_API_KEY, sceneDescriptions[sceneIdx].label);
+                } catch (pexelsErr) {
+                  console.log(`Non-fatal: Pexels search failed for scene ${sceneIdx}:`, pexelsErr.message);
+                }
+              }
+
+              if (pexelsResult) {
+                try {
+                  const pexelsImageBase64 = await fetchImageAsBase64(pexelsResult.previewImageUrl);
+                  frames = await captureImageSceneFrames(page, {
+                    imageBase64: pexelsImageBase64,
+                    motionType: motionType,
+                    labelText: sceneDescriptions[sceneIdx].label
+                  }, 6, 150);
+                  console.log(`Scene ${sceneIdx} using Pexels photo by ${pexelsResult.photographer}`);
+                } catch (pexelsImgErr) {
+                  console.log(`Non-fatal: Pexels image processing failed for scene ${sceneIdx}, trying AI generation:`, pexelsImgErr.message);
+                  pexelsResult = null;
+                }
+              }
+
+              const canProceedSceneImage = !pexelsResult && await checkNeuronBudget(env, "image_generation");
+              if (!pexelsResult && canProceedSceneImage) {
                 try {
                   const sceneImagePrompt = `${sceneDescriptions[sceneIdx].label}, cinematic, dramatic lighting, vibrant colors, professional illustration, no text, no logos`;
                   const sceneImageResp = await env.AI.run("@cf/black-forest-labs/flux-1-schnell", { prompt: sceneImagePrompt });
@@ -1198,8 +1256,8 @@ export default {
                     labelText: sceneDescriptions[sceneIdx].label
                   }, 6, 150);
                 }
-              } else {
-                console.log(`Neuron budget exhausted, using gradient fallback for scene ${sceneIdx}`);
+              } else if (!frames) {
+                console.log(`No Pexels match and neuron budget exhausted, using gradient fallback for scene ${sceneIdx}`);
                 const colorPair = COLOR_PAIRS[(contentPlanId + sceneIdx) % COLOR_PAIRS.length];
                 frames = await captureSceneFrames(page, {
                   emoji: sceneDescriptions[sceneIdx].emoji,
@@ -1463,6 +1521,11 @@ export default {
     }
   }
 };
+
+
+
+
+
 
 
 
