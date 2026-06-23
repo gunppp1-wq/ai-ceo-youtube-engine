@@ -882,6 +882,16 @@ export default {
         const backlogPlans = await env.ai_ceo_memory.prepare("SELECT COUNT(*) as cnt FROM content_plans cp WHERE NOT EXISTS (SELECT 1 FROM videos v WHERE v.content_plan_id = cp.id)").first();
         const removedVideos = await env.ai_ceo_memory.prepare("SELECT COUNT(*) as cnt FROM removed_videos").first();
         const latestStats = await env.ai_ceo_memory.prepare("SELECT subscriber_count, view_count, video_count, recorded_at FROM channel_stats ORDER BY id DESC LIMIT 1").first();
+
+        const watchTimeTotal = await env.ai_ceo_memory.prepare("SELECT SUM(watch_time_minutes) as total_minutes FROM video_performance").first();
+        const totalWatchHours = watchTimeTotal?.total_minutes ? (watchTimeTotal.total_minutes / 60) : 0;
+        const currentSubs = latestStats?.subscriber_count || 0;
+
+        const monetizationProgress = {
+          subscribers: { current: currentSubs, needed: 1000, percent: Math.min(100, (currentSubs / 1000) * 100).toFixed(1) },
+          watch_hours: { current: totalWatchHours.toFixed(1), needed: 4000, percent: Math.min(100, (totalWatchHours / 4000) * 100).toFixed(1) },
+          eligible: currentSubs >= 1000 && totalWatchHours >= 4000
+        };
         const todayUsage = await env.ai_ceo_memory.prepare("SELECT op_type, count FROM daily_usage WHERE usage_date = ?").bind(today).all();
         const recentAlerts = await env.ai_ceo_memory.prepare("SELECT alert_type, message, created_at FROM system_alerts ORDER BY id DESC LIMIT 5").all();
         const rotationStatus = await env.ai_ceo_memory.prepare("SELECT hour, last_used_at FROM publish_hour_rotation ORDER BY hour ASC").all();
@@ -892,6 +902,7 @@ export default {
           unused_content_plans_backlog: backlogPlans?.cnt || 0,
           videos_removed_for_moderation: removedVideos?.cnt || 0,
           channel_stats: latestStats || null,
+          monetization_progress: monetizationProgress,
           today_usage: todayUsage.results,
           recent_alerts: recentAlerts.results,
           publish_hour_rotation: rotationStatus.results
@@ -1602,6 +1613,8 @@ export default {
     }
   }
 };
+
+
 
 
 
