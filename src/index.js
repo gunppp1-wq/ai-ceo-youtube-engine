@@ -306,6 +306,29 @@ Given this data (which may still be very early/limited), is the current trajecto
   return (aiResponse.response || "").trim();
 }
 
+async function selectHookVariant(env) {
+  const variantCounts = await env.ai_ceo_memory.prepare(
+    "SELECT variant_text, COUNT(*) as cnt FROM prompt_variants WHERE variant_type = 'hook_intensity' GROUP BY variant_text"
+  ).all();
+
+  const countMap = {};
+  for (const row of variantCounts.results) {
+    countMap[row.variant_text] = row.cnt;
+  }
+
+  let leastUsed = HOOK_INTENSITY_VARIANTS[0];
+  let leastCount = countMap[leastUsed.id] || 0;
+  for (const variant of HOOK_INTENSITY_VARIANTS) {
+    const count = countMap[variant.id] || 0;
+    if (count < leastCount) {
+      leastUsed = variant;
+      leastCount = count;
+    }
+  }
+
+  return leastUsed;
+}
+
 async function reasonTopicSelection(env, candidates, recentTitles) {
   if (candidates.length === 0) return null;
   if (candidates.length === 1) return candidates[0];
@@ -790,6 +813,12 @@ function passesPlatformSafetyGate(text) {
 
   return { passes: true, reason: null };
 }
+
+const HOOK_INTENSITY_VARIANTS = [
+  { id: "direct", instruction: "State your contrarian take immediately and plainly in the first sentence - no buildup." },
+  { id: "delayed", instruction: "Open by stating the topic neutrally, then pivot to your contrarian take in the second sentence." },
+  { id: "question", instruction: "Open with a pointed rhetorical question that implies your contrarian take, before stating it directly." }
+];
 
 const SCRIPT_STRUCTURES = [
   `Structure your script in three parts:\n1. HOOK (first 1-2 sentences): State what this is about, then immediately contrast it with what people usually assume - create a "wait, really?" moment that makes them want to keep watching\n2. BODY: Build real tension - raise a question or a stake, delay your full answer for a beat, then deliver your actual take with conviction\n3. OUTRO (final 1-2 sentences): A clear payoff or takeaway - leave the viewer with your real opinion stated plainly, don't just trail off`,
@@ -1357,6 +1386,7 @@ export default {
             const cleanTitle = opp.title.split(": ").slice(1).join(": ").replace(/[\u2013\u2014]/g, "-").replace(/"/g, "");
 
             const selectedStructure = SCRIPT_STRUCTURES[opp.id % SCRIPT_STRUCTURES.length];
+            const selectedHookVariant = await selectHookVariant(env);
 
             const memoryNote = recentTitles
               ? `\n\nFor context, your recent videos covered: ${recentTitles}. If relevant, you may briefly reference one of these for continuity, but don't force it.`
@@ -1366,7 +1396,7 @@ export default {
               ? `\n\nFor reference, here are some currently high-performing video titles from similar commentary channels: ${competitorTitleExamples}. Use these only to understand what title styles and angles are resonating right now - do not copy them, write something original in your own voice.`
               : "";
 
-            const prompt = `${PERSONA}\n\nWrite a 20-25 second video script (just the spoken narration, no stage directions) about this trending topic: ${cleanTitle}.${memoryNote}${competitorNote}\n\nWrite this in a natural, conversational tone with appropriate punctuation for text-to-speech - use contractions, vary your rhythm, and write the way someone would actually speak out loud, not like formal writing.\n\n${selectedStructure}\n\nWriting style for text-to-speech: write the way you'd actually talk, not like an essay. Use short sentences. Use natural punctuation - commas, periods, dashes - to create pauses where you'd naturally pause speaking. Vary your sentence length: mix short punchy lines with slightly longer ones, the way real speech actually flows.\n\nAlso suggest a catchy, clickable video title under 60 characters that reflects your personality.\n\nFinally, describe 3 distinct visual scenes representing the subject matter, plus one SEPARATE thumbnail concept. For each scene, give: a single relevant emoji, and a short 3-5 word label phrase (not the title, never include literal words like "text" or "title"). For the thumbnail specifically, choose the single most dramatic, attention-grabbing emoji and phrase that captures the core hook of the video - this is what people see before clicking. Format your response exactly as:\nTITLE: <title>\nSCRIPT: <script>\nSCENE1_EMOJI: <emoji>\nSCENE1_LABEL: <short phrase>\nSCENE2_EMOJI: <emoji>\nSCENE2_LABEL: <short phrase>\nSCENE3_EMOJI: <emoji>\nSCENE3_LABEL: <short phrase>\nTHUMBNAIL_EMOJI: <emoji>\nTHUMBNAIL_LABEL: <short dramatic phrase>`;
+            const prompt = `${PERSONA}\n\nWrite a 20-25 second video script (just the spoken narration, no stage directions) about this trending topic: ${cleanTitle}.${memoryNote}${competitorNote}\n\nWrite this in a natural, conversational tone with appropriate punctuation for text-to-speech - use contractions, vary your rhythm, and write the way someone would actually speak out loud, not like formal writing.\n\n${selectedStructure}\n\nFor your HOOK specifically: ${selectedHookVariant.instruction}\n\nWriting style for text-to-speech: write the way you'd actually talk, not like an essay. Use short sentences. Use natural punctuation - commas, periods, dashes - to create pauses where you'd naturally pause speaking. Vary your sentence length: mix short punchy lines with slightly longer ones, the way real speech actually flows.\n\nAlso suggest a catchy, clickable video title under 60 characters that reflects your personality.\n\nFinally, describe 3 distinct visual scenes representing the subject matter, plus one SEPARATE thumbnail concept. For each scene, give: a single relevant emoji, and a short 3-5 word label phrase (not the title, never include literal words like "text" or "title"). For the thumbnail specifically, choose the single most dramatic, attention-grabbing emoji and phrase that captures the core hook of the video - this is what people see before clicking. Format your response exactly as:\nTITLE: <title>\nSCRIPT: <script>\nSCENE1_EMOJI: <emoji>\nSCENE1_LABEL: <short phrase>\nSCENE2_EMOJI: <emoji>\nSCENE2_LABEL: <short phrase>\nSCENE3_EMOJI: <emoji>\nSCENE3_LABEL: <short phrase>\nTHUMBNAIL_EMOJI: <emoji>\nTHUMBNAIL_LABEL: <short dramatic phrase>`;
 
             const aiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
               messages: [{ role: "user", content: prompt }]
@@ -1419,6 +1449,14 @@ export default {
             ).bind(opp.id, generatedTitle, generatedScript, JSON.stringify({ style: isCommentary ? "commentary" : "direct", persona: "skeptical_fan", sceneDescriptions, thumbnailDescription })).first();
 
             contentPlanId = insertedPlan.id;
+
+            try {
+              await env.ai_ceo_memory.prepare(
+                "INSERT INTO prompt_variants (variant_type, variant_text, content_plan_id) VALUES (?, ?, ?)"
+              ).bind("hook_intensity", selectedHookVariant.id, contentPlanId).run();
+            } catch (variantLogErr) {
+              console.log("Non-fatal: failed to log prompt variant:", variantLogErr.message);
+            }
 
             await env.ai_ceo_memory.prepare(
               "UPDATE opportunities SET status = 'used' WHERE id = ?"
@@ -1875,6 +1913,11 @@ export default {
     }
   }
 };
+
+
+
+
+
 
 
 
