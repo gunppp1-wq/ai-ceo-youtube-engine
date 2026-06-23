@@ -590,6 +590,12 @@ function passesPlatformSafetyGate(text) {
   return { passes: true, reason: null };
 }
 
+const SCRIPT_STRUCTURES = [
+  `Structure your script in three parts:\n1. HOOK (first 1-2 sentences): State what this is about, then immediately contrast it with what people usually assume - create a "wait, really?" moment that makes them want to keep watching\n2. BODY: Build real tension - raise a question or a stake, delay your full answer for a beat, then deliver your actual take with conviction\n3. OUTRO (final 1-2 sentences): A clear payoff or takeaway - leave the viewer with your real opinion stated plainly, don't just trail off`,
+  `Structure your script as a quick countdown or list:\n1. OPENING (1 sentence): Name the topic directly, no preamble\n2. POINTS: Give 2-3 short, specific observations or examples about it, building from least to most surprising or strongest\n3. CLOSING (1 sentence): A sharp final judgment that ties the points together - don't just summarize, conclude`,
+  `Structure your script as a direct question to the viewer:\n1. QUESTION (1-2 sentences): Open with a provocative, specific question related to the topic that the viewer will want answered\n2. ANSWER: Work through your actual answer with real reasoning, not just an assertion\n3. TURN (final 1-2 sentences): End by turning the question back to the viewer - ask them what they think, inviting a comment, without sounding like generic engagement-bait`
+];
+
 const PERSONA = `You are "The Skeptical Fan" - a YouTube commentator persona with a consistent voice across every video:
 - You genuinely love movies, games, and music, but have zero patience for obvious marketing tricks and hype-building tactics
 - When you notice a hype tactic (logo reveals, "coming soon" teases, vague trailers), you call it out by name
@@ -1074,6 +1080,8 @@ export default {
             const isCommentary = opp.status === "needs_commentary_angle";
             const cleanTitle = opp.title.split(": ").slice(1).join(": ").replace(/[\u2013\u2014]/g, "-").replace(/"/g, "");
 
+            const selectedStructure = SCRIPT_STRUCTURES[opp.id % SCRIPT_STRUCTURES.length];
+
             const memoryNote = recentTitles
               ? `\n\nFor context, your recent videos covered: ${recentTitles}. If relevant, you may briefly reference one of these for continuity, but don't force it.`
               : "";
@@ -1082,7 +1090,7 @@ export default {
               ? `\n\nFor reference, here are some currently high-performing video titles from similar commentary channels: ${competitorTitleExamples}. Use these only to understand what title styles and angles are resonating right now - do not copy them, write something original in your own voice.`
               : "";
 
-            const prompt = `${PERSONA}\n\nWrite a 20-25 second video script (just the spoken narration, no stage directions) about this trending topic: ${cleanTitle}.${memoryNote}${competitorNote}\n\nWrite this in a natural, conversational tone with appropriate punctuation for text-to-speech - use contractions, vary your rhythm, and write the way someone would actually speak out loud, not like formal writing.\n\nStructure your script in three parts:\n1. HOOK (first 1-2 sentences): State what this is about, then immediately contrast it with what people usually assume - create a "wait, really?" moment that makes them want to keep watching\n2. BODY: Build real tension - raise a question or a stake, delay your full answer for a beat, then deliver your actual take with conviction\n3. OUTRO (final 1-2 sentences): A clear payoff or takeaway - leave the viewer with your real opinion stated plainly, don't just trail off\n\nWriting style for text-to-speech: write the way you'd actually talk, not like an essay. Use short sentences. Use natural punctuation - commas, periods, dashes - to create pauses where you'd naturally pause speaking. Vary your sentence length: mix short punchy lines with slightly longer ones, the way real speech actually flows.\n\nAlso suggest a catchy, clickable video title under 60 characters that reflects your personality.\n\nFinally, describe 3 distinct visual scenes representing the subject matter, plus one SEPARATE thumbnail concept. For each scene, give: a single relevant emoji, and a short 3-5 word label phrase (not the title, never include literal words like "text" or "title"). For the thumbnail specifically, choose the single most dramatic, attention-grabbing emoji and phrase that captures the core hook of the video - this is what people see before clicking. Format your response exactly as:\nTITLE: <title>\nSCRIPT: <script>\nSCENE1_EMOJI: <emoji>\nSCENE1_LABEL: <short phrase>\nSCENE2_EMOJI: <emoji>\nSCENE2_LABEL: <short phrase>\nSCENE3_EMOJI: <emoji>\nSCENE3_LABEL: <short phrase>\nTHUMBNAIL_EMOJI: <emoji>\nTHUMBNAIL_LABEL: <short dramatic phrase>`;
+            const prompt = `${PERSONA}\n\nWrite a 20-25 second video script (just the spoken narration, no stage directions) about this trending topic: ${cleanTitle}.${memoryNote}${competitorNote}\n\nWrite this in a natural, conversational tone with appropriate punctuation for text-to-speech - use contractions, vary your rhythm, and write the way someone would actually speak out loud, not like formal writing.\n\n${selectedStructure}\n\nWriting style for text-to-speech: write the way you'd actually talk, not like an essay. Use short sentences. Use natural punctuation - commas, periods, dashes - to create pauses where you'd naturally pause speaking. Vary your sentence length: mix short punchy lines with slightly longer ones, the way real speech actually flows.\n\nAlso suggest a catchy, clickable video title under 60 characters that reflects your personality.\n\nFinally, describe 3 distinct visual scenes representing the subject matter, plus one SEPARATE thumbnail concept. For each scene, give: a single relevant emoji, and a short 3-5 word label phrase (not the title, never include literal words like "text" or "title"). For the thumbnail specifically, choose the single most dramatic, attention-grabbing emoji and phrase that captures the core hook of the video - this is what people see before clicking. Format your response exactly as:\nTITLE: <title>\nSCRIPT: <script>\nSCENE1_EMOJI: <emoji>\nSCENE1_LABEL: <short phrase>\nSCENE2_EMOJI: <emoji>\nSCENE2_LABEL: <short phrase>\nSCENE3_EMOJI: <emoji>\nSCENE3_LABEL: <short phrase>\nTHUMBNAIL_EMOJI: <emoji>\nTHUMBNAIL_LABEL: <short dramatic phrase>`;
 
             const aiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
               messages: [{ role: "user", content: prompt }]
@@ -1551,6 +1559,11 @@ export default {
     }
   }
 };
+
+
+
+
+
 
 
 
