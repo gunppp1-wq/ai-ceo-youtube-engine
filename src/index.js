@@ -254,6 +254,35 @@ async function setYoutubeThumbnail(accessToken, videoId, thumbnailBytes) {
   return await res.json();
 }
 
+async function critiqueScriptOriginality(env, script, title) {
+  const critiquePrompt = `You are a strict, skeptical content critic reviewing a YouTube Shorts script BEFORE it gets published. Your job is to catch generic, templated, or low-effort writing that would feel like "AI slop" to a real viewer.
+
+Title: ${title}
+Script: ${script}
+
+Evaluate honestly:
+1. Does this sound like a real person with an opinion, or like a generic template filled with this topic's name swapped in?
+2. Are there any cliche phrases that overused AI-generated content tends to use (e.g. "here we go again", "let's be real", excessive rhetorical questions stacked together)?
+3. Does the ending feel like a genuine conclusion, or does it trail off generically?
+
+Respond in exactly this format:
+VERDICT: PASS or REVISE
+REASON: <one sentence explaining your verdict>`;
+
+  const critiqueResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+    messages: [{ role: "user", content: critiquePrompt }]
+  });
+
+  const responseText = critiqueResponse.response || "";
+  const verdictMatch = responseText.match(/VERDICT:\s*(PASS|REVISE)/i);
+  const reasonMatch = responseText.match(/REASON:\s*(.+)/i);
+
+  return {
+    passes: verdictMatch ? verdictMatch[1].toUpperCase() === "PASS" : true,
+    reason: reasonMatch ? reasonMatch[1].trim() : "No reason provided"
+  };
+}
+
 async function generateChannelIdentity(env) {
   const prompt = `${PERSONA}\n\nYou need to design the YouTube channel identity for this persona. Generate:\n1. A catchy channel NAME under 30 characters that reflects this skeptical-but-passionate commentator persona (not generic, memorable, fits a trending pop-culture/gaming/music commentary channel)\n2. A channel DESCRIPTION under 800 characters that tells potential subscribers what to expect, written in the persona voice\n3. A BANNER_PROMPT - a short visual description (for an AI image generator) for a YouTube channel banner background that fits this persona and content (dramatic, eye-catching, NOT containing any text/words/logos)\n\nFormat exactly as:\nNAME: <name>\nDESCRIPTION: <description>\nBANNER_PROMPT: <prompt>`;
 
@@ -1178,6 +1207,20 @@ export default {
             continue;
           }
 
+          try {
+            const critiqueResult = await critiqueScriptOriginality(env, generatedScript, generatedTitle);
+            if (!critiqueResult.passes) {
+              console.log(`ORIGINALITY CRITIC BLOCKED content_plan_id=${contentPlanId}: ${critiqueResult.reason}`);
+              await env.ai_ceo_memory.prepare(
+                "INSERT INTO system_alerts (alert_type, message) VALUES (?, ?)"
+              ).bind("ORIGINALITY_CRITIC_BLOCKED", `content_plan_id=${contentPlanId}: ${critiqueResult.reason}`).run();
+              continue;
+            }
+            console.log(`Originality critic passed content_plan_id=${contentPlanId}`);
+          } catch (critiqueErr) {
+            console.log(`Non-fatal: originality critic check failed, proceeding anyway:`, critiqueErr.message);
+          }
+
           const canProceedAudio = await checkAndIncrementDailyLimit(env, "b2_audio_upload");
           const canProceedFrames = await checkAndIncrementDailyLimit(env, "browser_render_scene");
           const canProceedThumbnail = await checkAndIncrementDailyLimit(env, "thumbnail_generation");
@@ -1559,6 +1602,8 @@ export default {
     }
   }
 };
+
+
 
 
 
