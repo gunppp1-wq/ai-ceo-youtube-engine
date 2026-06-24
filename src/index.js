@@ -373,6 +373,178 @@ Given this data (which may still be very early/limited), is the current trajecto
   return (aiResponse.response || "").trim();
 }
 
+async function getAnalyzerDownloadUrl(env, fileName) {
+  const authData = await b2Authorize(env, env.ANALYZER_B2_KEY_ID, env.ANALYZER_B2_APPLICATION_KEY);
+  const downloadUrlBase = authData.apiInfo.storageApi.downloadUrl;
+  const authToken = authData.authorizationToken;
+  return `${downloadUrlBase}/file/ai-ceo-analyzer-inputs/${fileName}?Authorization=${authToken}`;
+}
+
+async function transcribeAudioWhisper(env, audioBuffer) {
+  const bytes = new Uint8Array(audioBuffer);
+  let binary = "";
+  const chunkSize = 8192;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
+  const base64 = btoa(binary);
+
+  const response = await env.AI.run("@cf/openai/whisper-large-v3-turbo", {
+    audio: base64
+  });
+  return {
+    text: response.text || "",
+    segments: response.segments || []
+  };
+}
+
+async function getB2FileId(apiUrl, authToken, bucketId, fileName) {
+  const res = await fetch(`${apiUrl}/b2api/v3/b2_list_file_names?bucketId=${bucketId}&startFileName=${encodeURIComponent(fileName)}&maxFileCount=1`, {
+    headers: { Authorization: authToken }
+  });
+  if (!res.ok) throw new Error(`b2_list_file_names failed: ${res.status}`);
+  const data = await res.json();
+  const match = data.files.find(f => f.fileName === fileName);
+  if (!match) throw new Error(`File not found in bucket: ${fileName}`);
+  return match.fileId;
+}
+
+async function deriveTopicFromAnalysis(env, transcription, frameAnalyses) {
+  const frameDescriptions = frameAnalyses.map((a, i) => `Frame ${i+1}: ${a}`).join("\n");
+  const prompt = `Based on this video's transcript and visual content, identify the topic/niche in 2-4 words (e.g. "cooking tutorial", "gaming commentary", "fitness routine").
+
+Transcript: "${transcription.text.slice(0, 1000)}"
+
+Visual frames:
+${frameDescriptions}
+
+Respond with ONLY the topic phrase, nothing else.`;
+
+  const response = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+    messages: [{ role: "user", content: prompt }]
+  });
+  return (response.response || "general content").trim();
+}
+
+async function synthesizeAnalyzerInsight(env, transcription, frameAnalyses, topic, benchmarkNote) {
+  const frameDescriptions = frameAnalyses.map((a, i) => `Frame ${i+1}: ${a}`).join("\n");
+  const benchmarkSection = benchmarkNote ? `\n\nFor context, here's what is known to perform well in this niche currently: ${benchmarkNote}` : "";
+
+  const prompt = `You are analyzing a video to extract ONE abstracted, reusable insight about what makes content engaging. Do NOT describe the specific content - extract a general PATTERN about structure, pacing, or presentation that could apply to other videos in this niche.
+
+Topic: ${topic}
+Transcript: "${transcription.text.slice(0, 1500)}"
+Visual analysis:
+${frameDescriptions}${benchmarkSection}
+
+Respond in this exact format:
+PATTERN: <short pattern name, e.g. "question-hook" or "fast-cut-pacing">
+TIMING: <approximate seconds into the video where this pattern occurs, or 0 if not time-specific>
+EFFECT: <what effect this likely has on viewer engagement, 1 sentence>
+CONFIDENCE: <a number 0.0-1.0 for how confident you are this is a genuine, reusable pattern>`;
+
+  const response = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+    messages: [{ role: "user", content: prompt }]
+  });
+  const text = response.response || "";
+
+  const pattern = (text.match(/PATTERN:\s*(.+)/i) || [])[1]?.trim() || "general-pattern";
+  const timing = parseFloat((text.match(/TIMING:\s*([\d.]+)/i) || [])[1]) || 0;
+  const effect = (text.match(/EFFECT:\s*(.+)/i) || [])[1]?.trim() || "";
+  const confidence = parseFloat((text.match(/CONFIDENCE:\s*([\d.]+)/i) || [])[1]) || 0.5;
+
+  return { pattern, timing, effect, confidence };
+}
+
+async function processAnalyzerInput(env, inputId) {
+  const inputRow = await env.ai_ceo_memory.prepare(
+    "SELECT * FROM analyzer_inputs WHERE id = ?"
+  ).bind(inputId).first();
+  if (!inputRow) throw new Error(`No analyzer_input found for id=${inputId}`);
+
+  const videoUrl = await getAnalyzerDownloadUrl(env, inputRow.b2_file_name);
+
+  console.log(`Calling Render /analyze-extract for analyzer_input_id=${inputId}...`);
+  const extractRes = await fetch("https://ai-ceo-video-assembler.onrender.com/analyze-extract", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      videoUrl: videoUrl,
+      b2KeyId: env.ANALYZER_B2_KEY_ID,
+      b2ApplicationKey: env.ANALYZER_B2_APPLICATION_KEY,
+      b2BucketId: env.ANALYZER_B2_BUCKET_ID
+    })
+  });
+  if (!extractRes.ok) throw new Error(`Render extraction failed: ${extractRes.status} ${await extractRes.text()}`);
+  const extractData = await extractRes.json();
+  const audioResult = extractData.audio;
+  const frameResults = extractData.frames;
+
+  console.log(`Transcribing extracted audio for analyzer_input_id=${inputId}...`);
+  const audioDownloadUrl = await getAnalyzerDownloadUrl(env, audioResult.fileName);
+  const audioRes = await fetch(audioDownloadUrl);
+  const audioBuffer = await audioRes.arrayBuffer();
+  const transcription = await transcribeAudioWhisper(env, audioBuffer);
+
+  console.log(`Analyzing ${frameResults.length} extracted frames for analyzer_input_id=${inputId}...`);
+  const frameAnalyses = [];
+  for (const frameResult of frameResults) {
+    try {
+      const frameDownloadUrl = await getAnalyzerDownloadUrl(env, frameResult.fileName);
+      const analysis = await analyzeThumbnail(env, frameDownloadUrl);
+      frameAnalyses.push(analysis);
+    } catch (frameErr) {
+      console.log(`Non-fatal: frame analysis failed for ${frameResult.fileName}:`, frameErr.message);
+    }
+  }
+
+  const topic = await deriveTopicFromAnalysis(env, transcription, frameAnalyses);
+  console.log(`Derived topic for analyzer_input_id=${inputId}: ${topic}`);
+
+  let benchmarkNote = null;
+  try {
+    await collectCompetitorInsights(env, topic);
+    const recentPattern = await env.ai_ceo_memory.prepare(
+      "SELECT analysis FROM title_pattern_insights WHERE query = ? ORDER BY id DESC LIMIT 1"
+    ).bind(topic).first();
+    benchmarkNote = recentPattern ? recentPattern.analysis : null;
+  } catch (benchmarkErr) {
+    console.log(`Non-fatal: competitor cross-referencing failed for analyzer_input_id=${inputId}:`, benchmarkErr.message);
+  }
+
+  const insight = await synthesizeAnalyzerInsight(env, transcription, frameAnalyses, topic, benchmarkNote);
+
+  await env.ai_ceo_memory.prepare(
+    "INSERT INTO analyzer_insights (analyzer_input_id, pattern, timing_seconds, observed_effect, niche, confidence) VALUES (?, ?, ?, ?, ?, ?)"
+  ).bind(inputId, insight.pattern, insight.timing, insight.effect, topic, insight.confidence).run();
+
+  console.log(`Stored insight for analyzer_input_id=${inputId}: ${insight.pattern} (confidence=${insight.confidence})`);
+
+  try {
+    const authData = await b2Authorize(env, env.ANALYZER_B2_KEY_ID, env.ANALYZER_B2_APPLICATION_KEY);
+    const apiUrl = authData.apiInfo.storageApi.apiUrl;
+    const authToken = authData.authorizationToken;
+
+    await b2DeleteFileVersion(apiUrl, authToken, audioResult.fileId, audioResult.fileName);
+    for (const frameResult of frameResults) {
+      await b2DeleteFileVersion(apiUrl, authToken, frameResult.fileId, frameResult.fileName);
+    }
+
+    const originalFileId = await getB2FileId(apiUrl, authToken, env.ANALYZER_B2_BUCKET_ID, inputRow.b2_file_name);
+    await b2DeleteFileVersion(apiUrl, authToken, originalFileId, inputRow.b2_file_name);
+
+    console.log(`Cleaned up original video + extracted audio/frames for analyzer_input_id=${inputId}`);
+  } catch (cleanupErr) {
+    console.log(`Non-fatal: cleanup failed for analyzer_input_id=${inputId}:`, cleanupErr.message);
+  }
+
+  await env.ai_ceo_memory.prepare(
+    "UPDATE analyzer_inputs SET status = ? WHERE id = ?"
+  ).bind("analyzed", inputId).run();
+
+  return { topic, insight };
+}
+
 async function getAnalyzerUploadUrl(env, fileName) {
   const authData = await b2Authorize(env, env.ANALYZER_B2_KEY_ID, env.ANALYZER_B2_APPLICATION_KEY);
   const apiUrl = authData.apiInfo.storageApi.apiUrl;
@@ -1372,6 +1544,253 @@ export default {
       }
     }
 
+    if (url.pathname === "/analyzer/upload") {
+      return new Response(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Analyzer Intake</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+  :root {
+    --bg: #0E0F11;
+    --surface: #16181B;
+    --border: #25282D;
+    --text: #E7E8EA;
+    --text-dim: #6B7280;
+    --accent: #E8A23D;
+    --accent-dim: #E8A23D33;
+    --success: #4ADE80;
+    --error: #F87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', system-ui, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 64px 24px;
+  }
+  .header { text-align: center; margin-bottom: 48px; max-width: 480px; }
+  .header .eyebrow {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 12px;
+  }
+  .header h1 { font-size: 28px; font-weight: 600; margin: 0 0 8px 0; letter-spacing: -0.01em; }
+  .header p { color: var(--text-dim); font-size: 15px; line-height: 1.5; margin: 0; }
+  .dropzone {
+    width: 100%;
+    max-width: 560px;
+    min-height: 220px;
+    border: 1.5px dashed var(--border);
+    border-radius: 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    cursor: pointer;
+    transition: border-color 0.25s ease, background 0.25s ease, box-shadow 0.25s ease;
+    background: var(--surface);
+    position: relative;
+    overflow: hidden;
+  }
+  .dropzone::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 50% 50%, var(--accent-dim), transparent 70%);
+    opacity: 0;
+    transition: opacity 0.3s ease;
+  }
+  .dropzone.dragover {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent), 0 0 32px var(--accent-dim);
+  }
+  .dropzone.dragover::before { opacity: 1; animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse {
+    0%, 100% { transform: scale(1); opacity: 0.5; }
+    50% { transform: scale(1.15); opacity: 0.9; }
+  }
+  .dropzone-icon { width: 40px; height: 40px; color: var(--text-dim); transition: color 0.25s ease; z-index: 1; }
+  .dropzone.dragover .dropzone-icon { color: var(--accent); }
+  .dropzone-label { font-size: 15px; font-weight: 500; z-index: 1; }
+  .dropzone-sub { font-size: 13px; color: var(--text-dim); font-family: 'JetBrains Mono', monospace; z-index: 1; }
+  input[type="file"] { display: none; }
+  .niche-input { width: 100%; max-width: 560px; margin-top: 16px; }
+  .niche-input input {
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 16px;
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    outline: none;
+    transition: border-color 0.2s ease;
+  }
+  .niche-input input:focus { border-color: var(--accent); }
+  .niche-input input::placeholder { color: var(--text-dim); }
+  .queue { width: 100%; max-width: 560px; margin-top: 40px; }
+  .queue-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 12px;
+  }
+  .queue-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    margin-bottom: 8px;
+    font-size: 14px;
+  }
+  .queue-item-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .queue-item-status { font-family: 'JetBrains Mono', monospace; font-size: 12px; flex-shrink: 0; }
+  .status-uploading { color: var(--accent); }
+  .status-done { color: var(--success); }
+  .status-error { color: var(--error); }
+  .spinner {
+    width: 12px;
+    height: 12px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    flex-shrink: 0;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+  <div class="header">
+    <div class="eyebrow">Learning Analyzer</div>
+    <h1>Feed the system</h1>
+    <p>Drop videos here. They're stored separately from your channel's assets, analyzed for what works, then discarded - only the patterns stay.</p>
+  </div>
+  <div class="dropzone" id="dropzone">
+    <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+      <path d="M12 16V4M12 4L7 9M12 4l5 5" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M4 16v3a2 2 0 002 2h12a2 2 0 002-2v-3" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <div class="dropzone-label">Drop videos here, or tap to choose</div>
+    <div class="dropzone-sub" id="dropzone-sub">.mp4 / .mov / .webm - one or many at once</div>
+    <input type="file" id="fileInput" accept="video/*" multiple>
+  </div>
+  <div class="niche-input">
+    <input type="text" id="nicheTag" placeholder="niche / topic tag (optional) - e.g. cooking, commentary, gaming">
+  </div>
+  <div class="queue" id="queue" style="display:none;">
+    <div class="queue-title">Intake queue</div>
+    <div id="queueList"></div>
+  </div>
+<script>
+  const WORKER_BASE = 'https://ai-ceo-orchestrator.jacklabs.workers.dev';
+  const dropzone = document.getElementById('dropzone');
+  const fileInput = document.getElementById('fileInput');
+  const nicheTag = document.getElementById('nicheTag');
+  const queue = document.getElementById('queue');
+  const queueList = document.getElementById('queueList');
+  dropzone.addEventListener('click', () => fileInput.click());
+  dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('dragover'); });
+  dropzone.addEventListener('dragleave', () => { dropzone.classList.remove('dragover'); });
+  dropzone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropzone.classList.remove('dragover');
+    const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('video/'));
+    files.forEach(uploadFile);
+  });
+  fileInput.addEventListener('change', (e) => {
+    Array.from(e.target.files).forEach(uploadFile);
+    fileInput.value = '';
+  });
+  function addQueueItem(fileName) {
+    queue.style.display = 'block';
+    const id = 'item-' + Math.random().toString(36).slice(2);
+    const el = document.createElement('div');
+    el.className = 'queue-item';
+    el.id = id;
+    el.innerHTML = '<div class="spinner"></div><div class="queue-item-name">' + fileName + '</div><div class="queue-item-status status-uploading">uploading</div>';
+    queueList.prepend(el);
+    return id;
+  }
+  function updateQueueItem(id, status, label) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const spinner = el.querySelector('.spinner');
+    const statusEl = el.querySelector('.queue-item-status');
+    if (status === 'done') {
+      spinner.remove();
+      statusEl.className = 'queue-item-status status-done';
+      statusEl.textContent = label || 'analyzed';
+    } else if (status === 'error') {
+      spinner.remove();
+      statusEl.className = 'queue-item-status status-error';
+      statusEl.textContent = label || 'failed';
+    } else {
+      statusEl.textContent = label || status;
+    }
+  }
+  async function uploadFile(file) {
+    const itemId = addQueueItem(file.name);
+    try {
+      const urlRes = await fetch(WORKER_BASE + '/analyzer/upload-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileName: file.name })
+      });
+      if (!urlRes.ok) throw new Error('Could not get upload URL');
+      const urlData = await urlRes.json();
+      const uploadUrl = urlData.uploadUrl;
+      const authToken = urlData.authToken;
+      const fileName = urlData.fileName;
+      const sha1 = await crypto.subtle.digest('SHA-1', await file.arrayBuffer());
+      const sha1Hex = Array.from(new Uint8Array(sha1)).map(b => b.toString(16).padStart(2, '0')).join('');
+      const uploadRes = await fetch(uploadUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': authToken,
+          'X-Bz-File-Name': encodeURIComponent(fileName),
+          'Content-Type': file.type || 'video/mp4',
+          'X-Bz-Content-Sha1': sha1Hex
+        },
+        body: file
+      });
+      if (!uploadRes.ok) throw new Error('Upload to storage failed');
+      updateQueueItem(itemId, 'uploading', 'registering');
+      const registerRes = await fetch(WORKER_BASE + '/analyzer/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileName: fileName, nicheTag: nicheTag.value.trim() || null })
+      });
+      if (!registerRes.ok) throw new Error('Could not register upload');
+      updateQueueItem(itemId, 'done', 'queued for analysis');
+    } catch (err) {
+      updateQueueItem(itemId, 'error', err.message);
+    }
+  }
+</script>
+</body>
+</html>
+`, { headers: { "Content-Type": "text/html" } });
+    }
+
     if (url.pathname === "/sponsor-kit") {
       try {
         const latestStats = await env.ai_ceo_memory.prepare(
@@ -2313,12 +2732,38 @@ Respond with only the reflection, no preamble.`;
         console.log("Non-fatal: channel stats fetch failed:", statsErr.message);
       }
 
+      try {
+        const pendingAnalyzerInput = await env.ai_ceo_memory.prepare(
+          "SELECT id FROM analyzer_inputs WHERE status = 'uploaded' ORDER BY id ASC LIMIT 1"
+        ).first();
+        if (pendingAnalyzerInput) {
+          console.log(`Processing analyzer_input_id=${pendingAnalyzerInput.id}...`);
+          await processAnalyzerInput(env, pendingAnalyzerInput.id);
+        }
+      } catch (analyzerErr) {
+        console.log("Non-fatal: analyzer input processing failed:", analyzerErr.message);
+        try {
+          await env.ai_ceo_memory.prepare(
+            "INSERT INTO system_alerts (alert_type, message) VALUES (?, ?)"
+          ).bind("ANALYZER_PROCESSING_FAILED", analyzerErr.message).run();
+        } catch (alertErr) {
+          console.log("Non-fatal: could not log analyzer failure to system_alerts:", alertErr.message);
+        }
+      }
       console.log("scheduled() completed successfully");
     } catch (outerErr) {
       console.log("FATAL ERROR in scheduled():", outerErr.message, outerErr.stack);
     }
   }
 };
+
+
+
+
+
+
+
+
 
 
 
