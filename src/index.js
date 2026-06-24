@@ -286,8 +286,72 @@ async function assessMonetizationTrajectory(env) {
   };
 }
 
-async function reasonAboutStrategy(env, trajectory) {
-  const strategyPrompt = `You are the strategic self-assessment layer for an automated YouTube commentary channel. Review your own growth trajectory and decide if any strategic change is warranted.
+async function researchExternalGrowthBenchmark(env) {
+  const niches = ["movie trailer reaction commentary", "gaming news commentary", "music video reaction"];
+  const channelIds = new Set();
+
+  for (const query of niches) {
+    try {
+      const searchUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&order=viewCount&maxResults=10&q=${encodeURIComponent(query)}&key=${env.YOUTUBE_API_KEY}`;
+      const searchRes = await fetch(searchUrl);
+      const searchData = await searchRes.json();
+      for (const item of (searchData.items || [])) {
+        if (item.snippet && item.snippet.channelId) channelIds.add(item.snippet.channelId);
+      }
+    } catch (searchErr) {
+      console.log(`Non-fatal: benchmark search failed for query "${query}":`, searchErr.message);
+    }
+  }
+
+  if (channelIds.size === 0) {
+    return { sampleSize: 0, note: "No comparable channels found" };
+  }
+
+  const idsParam = Array.from(channelIds).slice(0, 50).join(",");
+  const channelsUrl = `https://www.googleapis.com/youtube/v3/channels?part=statistics,snippet&id=${idsParam}&key=${env.YOUTUBE_API_KEY}`;
+  const channelsRes = await fetch(channelsUrl);
+  const channelsData = await channelsRes.json();
+
+  const comparable = (channelsData.items || []).filter(ch => {
+    const subs = parseInt(ch.statistics.subscriberCount || "0", 10);
+    return subs >= 500 && subs <= 50000 && !ch.statistics.hiddenSubscriberCount;
+  });
+
+  if (comparable.length === 0) {
+    return { sampleSize: 0, note: "No channels in comparable size range (500-50000 subs) found" };
+  }
+
+  const now = Date.now();
+  let totalVideos = 0;
+  let totalAgeDays = 0;
+  let totalSubs = 0;
+
+  for (const ch of comparable) {
+    totalVideos += parseInt(ch.statistics.videoCount || "0", 10);
+    totalSubs += parseInt(ch.statistics.subscriberCount || "0", 10);
+    const ageDays = (now - new Date(ch.snippet.publishedAt).getTime()) / (1000 * 60 * 60 * 24);
+    totalAgeDays += ageDays;
+  }
+
+  const avgVideoCount = totalVideos / comparable.length;
+  const avgChannelAgeDays = totalAgeDays / comparable.length;
+  const avgSubs = totalSubs / comparable.length;
+
+  return {
+    sampleSize: comparable.length,
+    avgVideoCount: avgVideoCount,
+    avgChannelAgeDays: avgChannelAgeDays,
+    avgSubs: avgSubs,
+    note: `Across ${comparable.length} comparable channels (500-50k subs) in this niche, average channel has ${avgVideoCount.toFixed(0)} videos and is ${(avgChannelAgeDays / 30).toFixed(1)} months old with ${avgSubs.toFixed(0)} avg subscribers.`
+  };
+}
+
+async function reasonAboutStrategy(env, trajectory, benchmark) {
+  const benchmarkSection = benchmark && benchmark.sampleSize > 0
+    ? `\n\nExternal benchmark (from researching comparable channels in this niche):\n${benchmark.note}`
+    : "";
+
+  const strategyPrompt = `You are the strategic self-assessment layer for an automated YouTube commentary channel. Review your own growth trajectory and decide if any strategic change is warranted.${benchmarkSection}
 
 Current trajectory:
 - Subscribers: ${trajectory.currentSubscribers} (need 1000 for monetization)
@@ -2053,7 +2117,29 @@ Respond with only the reflection, no preamble.`;
           try {
             const trajectory = await assessMonetizationTrajectory(env);
             if (trajectory.hasEnoughData) {
-              const assessment = await reasonAboutStrategy(env, trajectory);
+              let benchmark = null;
+              try {
+                const lastBenchmark = await env.ai_ceo_memory.prepare(
+                  "SELECT chosen_value, reasoning, created_at FROM reasoning_history WHERE decision_type = 'growth_benchmark' ORDER BY id DESC LIMIT 1"
+                ).first();
+                const daysSinceLastBenchmark = lastBenchmark
+                  ? (Date.now() - new Date(lastBenchmark.created_at + "Z").getTime()) / (1000 * 60 * 60 * 24)
+                  : 999;
+
+                if (daysSinceLastBenchmark >= 30) {
+                  console.log("Running monthly external growth benchmark research...");
+                  benchmark = await researchExternalGrowthBenchmark(env);
+                  await env.ai_ceo_memory.prepare(
+                    "INSERT INTO reasoning_history (decision_type, chosen_value, reasoning) VALUES (?, ?, ?)"
+                  ).bind("growth_benchmark", `sampleSize=${benchmark.sampleSize}`, benchmark.note || "").run();
+                } else if (lastBenchmark) {
+                  benchmark = { sampleSize: 1, note: lastBenchmark.reasoning };
+                }
+              } catch (benchmarkErr) {
+                console.log("Non-fatal: external growth benchmark failed:", benchmarkErr.message);
+              }
+
+              const assessment = await reasonAboutStrategy(env, trajectory, benchmark);
               console.log(`Strategy self-assessment: ${assessment}`);
 
               await env.ai_ceo_memory.prepare(
@@ -2076,6 +2162,9 @@ Respond with only the reflection, no preamble.`;
     }
   }
 };
+
+
+
 
 
 
