@@ -431,7 +431,7 @@ async function getAnalyzerDownloadUrl(env, fileName) {
   const authData = await b2Authorize(env, env.ANALYZER_B2_KEY_ID, env.ANALYZER_B2_APPLICATION_KEY);
   const downloadUrlBase = authData.apiInfo.storageApi.downloadUrl;
   const authToken = authData.authorizationToken;
-  return `${downloadUrlBase}/file/ai-ceo-analyzer-inputs/${fileName}?Authorization=${authToken}`;
+  return `${downloadUrlBase}/file/ai-ceo-analyzer-inputs/${encodeURIComponent(fileName)}?Authorization=${authToken}`;
 }
 
 async function transcribeAudioWhisper(env, audioBuffer) {
@@ -2916,16 +2916,23 @@ Respond with only the reflection, no preamble.`;
           "SELECT id, b2_file_name, duration_seconds, attempt_count FROM analyzer_inputs WHERE status = 'uploaded' ORDER BY id ASC LIMIT 50"
         ).all();
 
+        const MAX_PROBES_PER_TICK = 15;
+        let probesThisTick = 0;
         for (const inputRow of pendingInputs.results) {
           if (inputRow.duration_seconds === null) {
+            if (probesThisTick >= MAX_PROBES_PER_TICK) {
+              continue;
+            }
             try {
               const probed = await probeVideoDuration(env, inputRow.b2_file_name);
               await env.ai_ceo_memory.prepare(
                 "UPDATE analyzer_inputs SET duration_seconds = ? WHERE id = ?"
               ).bind(probed, inputRow.id).run();
               inputRow.duration_seconds = probed;
+              probesThisTick++;
               console.log(`Probed duration for analyzer_input_id=${inputRow.id}: ${probed}s`);
             } catch (probeErr) {
+              probesThisTick++;
               console.log(`Non-fatal: duration probe failed for analyzer_input_id=${inputRow.id}:`, probeErr.message);
             }
           }
@@ -2999,6 +3006,8 @@ Respond with only the reflection, no preamble.`;
     }
   }
 };
+
+
 
 
 
