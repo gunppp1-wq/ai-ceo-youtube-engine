@@ -308,6 +308,28 @@ Given this data (which may still be very early/limited), is the current trajecto
 }
 
 async function selectTitleVariant(env) {
+  const MIN_SAMPLE_SIZE = 5;
+  const performanceRows = await env.ai_ceo_memory.prepare(`
+    SELECT pv.variant_text,
+           COUNT(*) as sample_size,
+           AVG(vp.views) as avg_views
+    FROM prompt_variants pv
+    JOIN videos v ON v.content_plan_id = pv.content_plan_id
+    JOIN video_performance vp ON vp.video_id = v.id
+    WHERE pv.variant_type = 'title_style'
+    GROUP BY pv.variant_text
+  `).all();
+
+  const scored = performanceRows.results.filter(r => r.sample_size >= MIN_SAMPLE_SIZE && r.avg_views != null);
+  if (scored.length > 0) {
+    const best = scored.reduce((a, b) => (a.avg_views > b.avg_views ? a : b));
+    const bestVariant = TITLE_STYLE_VARIANTS.find(v => v.id === best.variant_text);
+    if (bestVariant) {
+      console.log(`Title variant selected by performance: ${bestVariant.id} (avg_views=${best.avg_views.toFixed(1)}, n=${best.sample_size})`);
+      return bestVariant;
+    }
+  }
+
   const variantCounts = await env.ai_ceo_memory.prepare(
     "SELECT variant_text, COUNT(*) as cnt FROM prompt_variants WHERE variant_type = 'title_style' GROUP BY variant_text"
   ).all();
@@ -331,6 +353,28 @@ async function selectTitleVariant(env) {
 }
 
 async function selectHookVariant(env) {
+  const MIN_SAMPLE_SIZE = 5;
+  const performanceRows = await env.ai_ceo_memory.prepare(`
+    SELECT pv.variant_text,
+           COUNT(*) as sample_size,
+           AVG(vp.average_view_duration) as avg_duration
+    FROM prompt_variants pv
+    JOIN videos v ON v.content_plan_id = pv.content_plan_id
+    JOIN video_performance vp ON vp.video_id = v.id
+    WHERE pv.variant_type = 'hook_intensity'
+    GROUP BY pv.variant_text
+  `).all();
+
+  const scored = performanceRows.results.filter(r => r.sample_size >= MIN_SAMPLE_SIZE && r.avg_duration != null);
+  if (scored.length > 0) {
+    const best = scored.reduce((a, b) => (a.avg_duration > b.avg_duration ? a : b));
+    const bestVariant = HOOK_INTENSITY_VARIANTS.find(v => v.id === best.variant_text);
+    if (bestVariant) {
+      console.log(`Hook variant selected by performance: ${bestVariant.id} (avg_duration=${best.avg_duration.toFixed(1)}s, n=${best.sample_size})`);
+      return bestVariant;
+    }
+  }
+
   const variantCounts = await env.ai_ceo_memory.prepare(
     "SELECT variant_text, COUNT(*) as cnt FROM prompt_variants WHERE variant_type = 'hook_intensity' GROUP BY variant_text"
   ).all();
@@ -1999,6 +2043,8 @@ export default {
     }
   }
 };
+
+
 
 
 
