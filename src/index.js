@@ -1,8 +1,10 @@
 ﻿import puppeteer from "@cloudflare/puppeteer";
 import { passesPlatformSafetyGate, passesEconomicsGate, containsForbiddenPaymentField, MIN_PROFIT_SCORE, MIN_SCRIPT_LENGTH } from "./protected-core.js";
 
-async function b2Authorize(env) {
-  const credentials = btoa(`${env.B2_KEY_ID}:${env.B2_APPLICATION_KEY}`);
+async function b2Authorize(env, keyId, applicationKey) {
+  const useKeyId = keyId || env.B2_KEY_ID;
+  const useAppKey = applicationKey || env.B2_APPLICATION_KEY;
+  const credentials = btoa(`${useKeyId}:${useAppKey}`);
   const res = await fetch("https://api.backblazeb2.com/b2api/v3/b2_authorize_account", {
     headers: { "Authorization": `Basic ${credentials}` }
   });
@@ -369,6 +371,18 @@ Given this data (which may still be very early/limited), is the current trajecto
   });
 
   return (aiResponse.response || "").trim();
+}
+
+async function getAnalyzerUploadUrl(env, fileName) {
+  const authData = await b2Authorize(env, env.ANALYZER_B2_KEY_ID, env.ANALYZER_B2_APPLICATION_KEY);
+  const apiUrl = authData.apiInfo.storageApi.apiUrl;
+  const authToken = authData.authorizationToken;
+  const uploadUrlData = await b2GetUploadUrl(apiUrl, authToken, env.ANALYZER_B2_BUCKET_ID);
+  return {
+    uploadUrl: uploadUrlData.uploadUrl,
+    authToken: uploadUrlData.authorizationToken,
+    fileName: fileName
+  };
 }
 
 async function selectTitleVariant(env) {
@@ -1330,6 +1344,34 @@ export default {
       }
     }
 
+    if (url.pathname === "/analyzer/upload-url" && request.method === "POST") {
+      try {
+        const body = await request.json();
+        if (!body.fileName) {
+          return new Response(JSON.stringify({ error: "fileName is required" }), { status: 400, headers: { "Content-Type": "application/json" } });
+        }
+        const result = await getAnalyzerUploadUrl(env, body.fileName);
+        return new Response(JSON.stringify(result), { headers: { "Content-Type": "application/json" } });
+      } catch (uploadUrlErr) {
+        return new Response(JSON.stringify({ error: uploadUrlErr.message }), { status: 500, headers: { "Content-Type": "application/json" } });
+      }
+    }
+
+    if (url.pathname === "/analyzer/register" && request.method === "POST") {
+      try {
+        const body = await request.json();
+        if (!body.fileName) {
+          return new Response(JSON.stringify({ error: "fileName is required" }), { status: 400, headers: { "Content-Type": "application/json" } });
+        }
+        const insertResult = await env.ai_ceo_memory.prepare(
+          "INSERT INTO analyzer_inputs (b2_file_name, niche_tag, status) VALUES (?, ?, ?) RETURNING id"
+        ).bind(body.fileName, body.nicheTag || null, "uploaded").first();
+        return new Response(JSON.stringify({ success: true, id: insertResult.id }), { headers: { "Content-Type": "application/json" } });
+      } catch (registerErr) {
+        return new Response(JSON.stringify({ error: registerErr.message }), { status: 500, headers: { "Content-Type": "application/json" } });
+      }
+    }
+
     if (url.pathname === "/sponsor-kit") {
       try {
         const latestStats = await env.ai_ceo_memory.prepare(
@@ -2277,6 +2319,9 @@ Respond with only the reflection, no preamble.`;
     }
   }
 };
+
+
+
 
 
 
