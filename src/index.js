@@ -353,7 +353,20 @@ async function reasonAboutStrategy(env, trajectory, benchmark) {
     ? `\n\nExternal benchmark (from researching comparable channels in this niche):\n${benchmark.note}`
     : "";
 
-  const strategyPrompt = `You are the strategic self-assessment layer for an automated YouTube commentary channel. Review your own growth trajectory and decide if any strategic change is warranted.${benchmarkSection}
+  let taughtStrategySection = "";
+  try {
+    const taughtInstructions = await env.ai_ceo_memory.prepare(
+      "SELECT instruction_text FROM user_instructions ORDER BY id DESC LIMIT 5"
+    ).all();
+    if (taughtInstructions.results && taughtInstructions.results.length > 0) {
+      const instructionList = taughtInstructions.results.map(r => r.instruction_text).join(" | ");
+      taughtStrategySection = `\n\nIMPORTANT - direct strategic instructions from your operator (these take priority over your own judgment and the benchmark above, factor them into your assessment and recommendation): ${instructionList}`;
+    }
+  } catch (taughtErr) {
+    console.log("Non-fatal: could not fetch taught instructions for strategy reasoning:", taughtErr.message);
+  }
+
+  const strategyPrompt = `You are the strategic self-assessment layer for an automated YouTube commentary channel. Review your own growth trajectory and decide if any strategic change is warranted.${benchmarkSection}${taughtStrategySection}
 
 Current trajectory:
 - Subscribers: ${trajectory.currentSubscribers} (need 1000 for monetization)
@@ -3029,6 +3042,8 @@ Respond with only the reflection, no preamble.`;
     }
   }
 };
+
+
 
 
 
