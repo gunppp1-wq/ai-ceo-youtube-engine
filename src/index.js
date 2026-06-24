@@ -1927,6 +1927,10 @@ export default {
   }
   async function uploadFile(file) {
     const itemId = addQueueItem(file.name);
+    if (!file.type || !file.type.startsWith('video/')) {
+      updateQueueItem(itemId, 'error', 'not a video file');
+      return;
+    }
     try {
       let urlRes;
       try {
@@ -3023,6 +3027,7 @@ Respond with only the reflection, no preamble.`;
     }
   }
 };
+
 
 
 
