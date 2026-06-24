@@ -593,13 +593,19 @@ async function processAnalyzerInput(env, inputId) {
   console.log(`Stored insight for analyzer_input_id=${inputId}: ${insight.pattern} (confidence=${insight.confidence})`);
 
   if (inputRow.mode === "teach") {
+    const trimmedTranscript = (transcription.text || "").trim();
+    const MIN_INSTRUCTION_LENGTH = 15;
+    if (trimmedTranscript.length < MIN_INSTRUCTION_LENGTH) {
+      console.log(`Teach mode: skipping storage for analyzer_input_id=${inputId} - transcript too short/empty (likely silence or transcription failure): "${trimmedTranscript}"`);
+    } else {
     try {
       await env.ai_ceo_memory.prepare(
         "INSERT INTO user_instructions (source_file, instruction_text) VALUES (?, ?)"
-      ).bind(inputRow.b2_file_name, transcription.text).run();
+      ).bind(inputRow.b2_file_name, trimmedTranscript).run();
       console.log(`Teach mode: stored direct instruction for analyzer_input_id=${inputId}`);
     } catch (teachErr) {
       console.log(`Non-fatal: storing teach instruction failed for analyzer_input_id=${inputId}:`, teachErr.message);
+    }
     }
   }
 
@@ -3015,6 +3021,8 @@ Respond with only the reflection, no preamble.`;
     }
   }
 };
+
+
 
 
 
