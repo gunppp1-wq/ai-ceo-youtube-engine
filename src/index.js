@@ -415,8 +415,8 @@ async function extractAudioOnly(env, videoUrl, b2KeyId, b2ApplicationKey, b2Buck
   return data.audio;
 }
 
-async function probeVideoDuration(env, fileName) {
-  const videoUrl = await getAnalyzerDownloadUrl(env, fileName);
+async function probeVideoDuration(env, fileName, fileId) {
+  const videoUrl = fileId ? await getAnalyzerDownloadUrlById(env, fileId) : await getAnalyzerDownloadUrl(env, fileName);
   const res = await fetch("https://ai-ceo-video-assembler.onrender.com/video-duration", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -432,6 +432,13 @@ async function getAnalyzerDownloadUrl(env, fileName) {
   const downloadUrlBase = authData.apiInfo.storageApi.downloadUrl;
   const authToken = authData.authorizationToken;
   return `${downloadUrlBase}/file/ai-ceo-analyzer-inputs/${encodeURIComponent(fileName)}?Authorization=${authToken}`;
+}
+
+async function getAnalyzerDownloadUrlById(env, fileId) {
+  const authData = await b2Authorize(env, env.ANALYZER_B2_KEY_ID, env.ANALYZER_B2_APPLICATION_KEY);
+  const downloadUrlBase = authData.apiInfo.storageApi.downloadUrl;
+  const authToken = authData.authorizationToken;
+  return `${downloadUrlBase}/b2api/v3/b2_download_file_by_id?fileId=${fileId}&Authorization=${authToken}`;
 }
 
 async function transcribeAudioWhisper(env, audioBuffer) {
@@ -516,7 +523,7 @@ async function processAnalyzerInput(env, inputId) {
   ).bind(inputId).first();
   if (!inputRow) throw new Error(`No analyzer_input found for id=${inputId}`);
 
-  const videoUrl = await getAnalyzerDownloadUrl(env, inputRow.b2_file_name);
+  const videoUrl = inputRow.b2_file_id ? await getAnalyzerDownloadUrlById(env, inputRow.b2_file_id) : await getAnalyzerDownloadUrl(env, inputRow.b2_file_name);
 
   const LONG_VIDEO_THRESHOLD_SECONDS = 3600;
   const isLongVideo = inputRow.duration_seconds !== null && inputRow.duration_seconds > LONG_VIDEO_THRESHOLD_SECONDS;
@@ -1673,8 +1680,8 @@ export default {
         }
         const mode = (body.mode === "teach") ? "teach" : "analyze";
         const insertResult = await env.ai_ceo_memory.prepare(
-          "INSERT INTO analyzer_inputs (b2_file_name, niche_tag, status, mode) VALUES (?, ?, ?, ?) RETURNING id"
-        ).bind(body.fileName, body.nicheTag || null, "uploaded", mode).first();
+          "INSERT INTO analyzer_inputs (b2_file_name, niche_tag, status, mode, b2_file_id) VALUES (?, ?, ?, ?, ?) RETURNING id"
+        ).bind(body.fileName, body.nicheTag || null, "uploaded", mode, body.b2FileId || null).first();
         return new Response(JSON.stringify({ success: true, id: insertResult.id }), { headers: { "Content-Type": "application/json" } });
       } catch (registerErr) {
         return new Response(JSON.stringify({ error: registerErr.message }), { status: 500, headers: { "Content-Type": "application/json" } });
@@ -1942,13 +1949,15 @@ export default {
         });
       } catch (e) { throw new Error('STEP2-uploadToB2: ' + e.message); }
       if (!uploadRes.ok) throw new Error('STEP2-uploadToB2: HTTP ' + uploadRes.status);
+      const uploadResultData = await uploadRes.json();
+      const b2FileId = uploadResultData.fileId;
       updateQueueItem(itemId, 'uploading', 'registering');
       let registerRes;
       try {
         registerRes = await fetch(WORKER_BASE + '/analyzer/register', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ fileName: fileName, nicheTag: nicheTag.value.trim() || null, mode: currentMode })
+          body: JSON.stringify({ fileName: fileName, nicheTag: nicheTag.value.trim() || null, mode: currentMode, b2FileId: b2FileId })
         });
       } catch (e) { throw new Error('STEP3-register: ' + e.message); }
       if (!registerRes.ok) throw new Error('STEP3-register: HTTP ' + registerRes.status);
@@ -2913,7 +2922,7 @@ Respond with only the reflection, no preamble.`;
 
       try {
         const pendingInputs = await env.ai_ceo_memory.prepare(
-          "SELECT id, b2_file_name, duration_seconds, attempt_count FROM analyzer_inputs WHERE status = 'uploaded' ORDER BY id ASC LIMIT 50"
+          "SELECT id, b2_file_name, b2_file_id, duration_seconds, attempt_count FROM analyzer_inputs WHERE status = 'uploaded' ORDER BY id ASC LIMIT 50"
         ).all();
 
         const MAX_PROBES_PER_TICK = 15;
@@ -2924,7 +2933,7 @@ Respond with only the reflection, no preamble.`;
               continue;
             }
             try {
-              const probed = await probeVideoDuration(env, inputRow.b2_file_name);
+              const probed = await probeVideoDuration(env, inputRow.b2_file_name, inputRow.b2_file_id);
               await env.ai_ceo_memory.prepare(
                 "UPDATE analyzer_inputs SET duration_seconds = ? WHERE id = ?"
               ).bind(probed, inputRow.id).run();
@@ -3006,6 +3015,15 @@ Respond with only the reflection, no preamble.`;
     }
   }
 };
+
+
+
+
+
+
+
+
+
 
 
 
