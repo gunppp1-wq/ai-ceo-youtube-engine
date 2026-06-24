@@ -520,6 +520,17 @@ async function processAnalyzerInput(env, inputId) {
 
   console.log(`Stored insight for analyzer_input_id=${inputId}: ${insight.pattern} (confidence=${insight.confidence})`);
 
+  if (inputRow.mode === "teach") {
+    try {
+      await env.ai_ceo_memory.prepare(
+        "INSERT INTO user_instructions (source_file, instruction_text) VALUES (?, ?)"
+      ).bind(inputRow.b2_file_name, transcription.text).run();
+      console.log(`Teach mode: stored direct instruction for analyzer_input_id=${inputId}`);
+    } catch (teachErr) {
+      console.log(`Non-fatal: storing teach instruction failed for analyzer_input_id=${inputId}:`, teachErr.message);
+    }
+  }
+
   try {
     const authData = await b2Authorize(env, env.ANALYZER_B2_KEY_ID, env.ANALYZER_B2_APPLICATION_KEY);
     const apiUrl = authData.apiInfo.storageApi.apiUrl;
@@ -1535,9 +1546,10 @@ export default {
         if (!body.fileName) {
           return new Response(JSON.stringify({ error: "fileName is required" }), { status: 400, headers: { "Content-Type": "application/json" } });
         }
+        const mode = (body.mode === "teach") ? "teach" : "analyze";
         const insertResult = await env.ai_ceo_memory.prepare(
-          "INSERT INTO analyzer_inputs (b2_file_name, niche_tag, status) VALUES (?, ?, ?) RETURNING id"
-        ).bind(body.fileName, body.nicheTag || null, "uploaded").first();
+          "INSERT INTO analyzer_inputs (b2_file_name, niche_tag, status, mode) VALUES (?, ?, ?, ?) RETURNING id"
+        ).bind(body.fileName, body.nicheTag || null, "uploaded", mode).first();
         return new Response(JSON.stringify({ success: true, id: insertResult.id }), { headers: { "Content-Type": "application/json" } });
       } catch (registerErr) {
         return new Response(JSON.stringify({ error: registerErr.message }), { status: 500, headers: { "Content-Type": "application/json" } });
@@ -1641,6 +1653,20 @@ export default {
   }
   .niche-input input:focus { border-color: var(--accent); }
   .niche-input input::placeholder { color: var(--text-dim); }
+  .mode-toggle { display: flex; gap: 8px; width: 100%; max-width: 560px; margin-top: 16px; }
+  .mode-btn {
+    flex: 1;
+    padding: 10px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--text-dim);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+  .mode-btn.active { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
   .queue { width: 100%; max-width: 560px; margin-top: 40px; }
   .queue-title {
     font-family: 'JetBrains Mono', monospace;
@@ -1693,6 +1719,10 @@ export default {
     <div class="dropzone-sub" id="dropzone-sub">.mp4 / .mov / .webm - one or many at once</div>
     <input type="file" id="fileInput" accept="video/*" multiple>
   </div>
+  <div class="mode-toggle" id="modeToggle">
+    <button class="mode-btn active" data-mode="analyze">Analyze</button>
+    <button class="mode-btn" data-mode="teach">Teach</button>
+  </div>
   <div class="niche-input">
     <input type="text" id="nicheTag" placeholder="niche / topic tag (optional) - e.g. cooking, commentary, gaming">
   </div>
@@ -1707,6 +1737,14 @@ export default {
   const nicheTag = document.getElementById('nicheTag');
   const queue = document.getElementById('queue');
   const queueList = document.getElementById('queueList');
+  let currentMode = 'analyze';
+  document.querySelectorAll('.mode-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      document.querySelectorAll('.mode-btn').forEach(function(b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      currentMode = btn.dataset.mode;
+    });
+  });
   dropzone.addEventListener('click', () => fileInput.click());
   dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('dragover'); });
   dropzone.addEventListener('dragleave', () => { dropzone.classList.remove('dragover'); });
@@ -1750,36 +1788,45 @@ export default {
   async function uploadFile(file) {
     const itemId = addQueueItem(file.name);
     try {
-      const urlRes = await fetch(WORKER_BASE + '/analyzer/upload-url', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fileName: file.name })
-      });
-      if (!urlRes.ok) throw new Error('Could not get upload URL');
+      let urlRes;
+      try {
+        urlRes = await fetch(WORKER_BASE + '/analyzer/upload-url', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fileName: file.name })
+        });
+      } catch (e) { throw new Error('STEP1-getUploadUrl: ' + e.message); }
+      if (!urlRes.ok) throw new Error('STEP1-getUploadUrl: HTTP ' + urlRes.status);
       const urlData = await urlRes.json();
       const uploadUrl = urlData.uploadUrl;
       const authToken = urlData.authToken;
       const fileName = urlData.fileName;
       const sha1 = await crypto.subtle.digest('SHA-1', await file.arrayBuffer());
       const sha1Hex = Array.from(new Uint8Array(sha1)).map(b => b.toString(16).padStart(2, '0')).join('');
-      const uploadRes = await fetch(uploadUrl, {
-        method: 'POST',
-        headers: {
-          'Authorization': authToken,
-          'X-Bz-File-Name': encodeURIComponent(fileName),
-          'Content-Type': file.type || 'video/mp4',
-          'X-Bz-Content-Sha1': sha1Hex
-        },
-        body: file
-      });
-      if (!uploadRes.ok) throw new Error('Upload to storage failed');
+      let uploadRes;
+      try {
+        uploadRes = await fetch(uploadUrl, {
+          method: 'POST',
+          headers: {
+            'Authorization': authToken,
+            'X-Bz-File-Name': encodeURIComponent(fileName),
+            'Content-Type': file.type || 'video/mp4',
+            'X-Bz-Content-Sha1': sha1Hex
+          },
+          body: file
+        });
+      } catch (e) { throw new Error('STEP2-uploadToB2: ' + e.message); }
+      if (!uploadRes.ok) throw new Error('STEP2-uploadToB2: HTTP ' + uploadRes.status);
       updateQueueItem(itemId, 'uploading', 'registering');
-      const registerRes = await fetch(WORKER_BASE + '/analyzer/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fileName: fileName, nicheTag: nicheTag.value.trim() || null })
-      });
-      if (!registerRes.ok) throw new Error('Could not register upload');
+      let registerRes;
+      try {
+        registerRes = await fetch(WORKER_BASE + '/analyzer/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fileName: fileName, nicheTag: nicheTag.value.trim() || null, mode: currentMode })
+        });
+      } catch (e) { throw new Error('STEP3-register: ' + e.message); }
+      if (!registerRes.ok) throw new Error('STEP3-register: HTTP ' + registerRes.status);
       updateQueueItem(itemId, 'done', 'queued for analysis');
     } catch (err) {
       updateQueueItem(itemId, 'error', err.message);
@@ -2122,7 +2169,14 @@ export default {
               ? `\n\nObserved structural pattern currently performing well in this niche (a pattern to inform your approach, not specific examples to copy): ${titlePatternHint}`
               : "";
 
-            const prompt = `${PERSONA}\n\nWrite a 20-25 second video script (just the spoken narration, no stage directions) about this trending topic: ${cleanTitle}.${memoryNote}${competitorNote}${titlePatternNote}\n\nWrite this in a natural, conversational tone with appropriate punctuation for text-to-speech - use contractions, vary your rhythm, and write the way someone would actually speak out loud, not like formal writing.\n\n${selectedStructure}\n\nFor your HOOK specifically: ${selectedHookVariant.instruction}\n\nWriting style for text-to-speech: write the way you'd actually talk, not like an essay. Use short sentences. Use natural punctuation - commas, periods, dashes - to create pauses where you'd naturally pause speaking. Vary your sentence length: mix short punchy lines with slightly longer ones, the way real speech actually flows.\n\nAlso suggest a catchy, clickable video title under 60 characters that reflects your personality. For the TITLE specifically: ${selectedTitleVariant.instruction}\n\nFinally, describe 3 distinct visual scenes representing the subject matter, plus one SEPARATE thumbnail concept. For each scene, give: a single relevant emoji, and a short 3-5 word label phrase (not the title, never include literal words like "text" or "title"). For the thumbnail specifically, choose the single most dramatic, attention-grabbing emoji and phrase that captures the core hook of the video - this is what people see before clicking. Format your response exactly as:\nTITLE: <title>\nSCRIPT: <script>\nSCENE1_EMOJI: <emoji>\nSCENE1_LABEL: <short phrase>\nSCENE2_EMOJI: <emoji>\nSCENE2_LABEL: <short phrase>\nSCENE3_EMOJI: <emoji>\nSCENE3_LABEL: <short phrase>\nTHUMBNAIL_EMOJI: <emoji>\nTHUMBNAIL_LABEL: <short dramatic phrase>`;
+            const userInstructionRows = await env.ai_ceo_memory.prepare(
+              "SELECT instruction_text FROM user_instructions ORDER BY id DESC LIMIT 5"
+            ).all();
+            const userInstructionNote = (userInstructionRows.results && userInstructionRows.results.length > 0)
+              ? `\n\nIMPORTANT - direct instructions from your operator (these take priority over everything else above, follow them closely): ${userInstructionRows.results.map(r => r.instruction_text).join(" | ")}`
+              : "";
+
+            const prompt = `${PERSONA}\n\nWrite a 20-25 second video script (just the spoken narration, no stage directions) about this trending topic: ${cleanTitle}.${userInstructionNote}${memoryNote}${competitorNote}${titlePatternNote}\n\nWrite this in a natural, conversational tone with appropriate punctuation for text-to-speech - use contractions, vary your rhythm, and write the way someone would actually speak out loud, not like formal writing.\n\n${selectedStructure}\n\nFor your HOOK specifically: ${selectedHookVariant.instruction}\n\nWriting style for text-to-speech: write the way you'd actually talk, not like an essay. Use short sentences. Use natural punctuation - commas, periods, dashes - to create pauses where you'd naturally pause speaking. Vary your sentence length: mix short punchy lines with slightly longer ones, the way real speech actually flows.\n\nAlso suggest a catchy, clickable video title under 60 characters that reflects your personality. For the TITLE specifically: ${selectedTitleVariant.instruction}\n\nFinally, describe 3 distinct visual scenes representing the subject matter, plus one SEPARATE thumbnail concept. For each scene, give: a single relevant emoji, and a short 3-5 word label phrase (not the title, never include literal words like "text" or "title"). For the thumbnail specifically, choose the single most dramatic, attention-grabbing emoji and phrase that captures the core hook of the video - this is what people see before clicking. Format your response exactly as:\nTITLE: <title>\nSCRIPT: <script>\nSCENE1_EMOJI: <emoji>\nSCENE1_LABEL: <short phrase>\nSCENE2_EMOJI: <emoji>\nSCENE2_LABEL: <short phrase>\nSCENE3_EMOJI: <emoji>\nSCENE3_LABEL: <short phrase>\nTHUMBNAIL_EMOJI: <emoji>\nTHUMBNAIL_LABEL: <short dramatic phrase>`;
 
             const aiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
               messages: [{ role: "user", content: prompt }]
@@ -2756,6 +2810,16 @@ Respond with only the reflection, no preamble.`;
     }
   }
 };
+
+
+
+
+
+
+
+
+
+
 
 
 
