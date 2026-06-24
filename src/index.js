@@ -1961,6 +1961,39 @@ export default {
               console.log(`Analytics recorded for video id=${pubVideo.id}: ${analytics.views} views, ${analytics.watchTimeMinutes} min watched`);
 
               try {
+                const usedVariants = await env.ai_ceo_memory.prepare(
+                  "SELECT variant_type, variant_text FROM prompt_variants WHERE content_plan_id = ?"
+                ).bind(pubVideo.content_plan_id).all();
+                const variantSummary = usedVariants.results.map(v => `${v.variant_type}=${v.variant_text}`).join(", ") || "unknown";
+
+                const postMortemPrompt = `You are reviewing the performance of a published YouTube Short. Write a short, plain-English reflection (1-2 sentences) on why it likely did well or badly. Be specific and causal, not just a restatement of the numbers.
+
+Title: "${pubVideo.title}"
+Variants used: ${variantSummary}
+Views: ${analytics.views}
+Average view duration: ${analytics.averageViewDuration}s
+Watch time: ${analytics.watchTimeMinutes} minutes
+Likes: ${analytics.likes}
+Comments: ${analytics.comments}
+
+Respond with only the reflection, no preamble.`;
+
+                const postMortemResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+                  messages: [{ role: "user", content: postMortemPrompt }]
+                });
+                const postMortemText = (postMortemResponse.response || "").trim();
+
+                if (postMortemText) {
+                  await env.ai_ceo_memory.prepare(
+                    "UPDATE video_performance SET post_mortem = ? WHERE video_id = ?"
+                  ).bind(postMortemText, pubVideo.id).run();
+                  console.log(`Post-mortem for video id=${pubVideo.id}: ${postMortemText}`);
+                }
+              } catch (postMortemErr) {
+                console.log(`Non-fatal: post-mortem generation failed for video id=${pubVideo.id}:`, postMortemErr.message);
+              }
+
+              try {
                 const freshComments = await fetchVideoComments(modAccessToken, pubVideo.youtube_video_id);
                 for (const comment of freshComments) {
                   await env.ai_ceo_memory.prepare(
@@ -2043,6 +2076,7 @@ export default {
     }
   }
 };
+
 
 
 
