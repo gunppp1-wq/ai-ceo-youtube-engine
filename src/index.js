@@ -1490,6 +1490,7 @@ export default {
         const readyVideos = await env.ai_ceo_memory.prepare("SELECT COUNT(*) as cnt FROM videos WHERE status = 'video_ready'").first();
         const backlogPlans = await env.ai_ceo_memory.prepare("SELECT COUNT(*) as cnt FROM content_plans cp WHERE NOT EXISTS (SELECT 1 FROM videos v WHERE v.content_plan_id = cp.id)").first();
         const analyzerBacklog = await env.ai_ceo_memory.prepare("SELECT COUNT(*) as cnt FROM analyzer_inputs WHERE status = 'uploaded'").first();
+        const analyzerFailed = await env.ai_ceo_memory.prepare("SELECT COUNT(*) as cnt FROM analyzer_inputs WHERE status = 'failed'").first();
         const removedVideos = await env.ai_ceo_memory.prepare("SELECT COUNT(*) as cnt FROM removed_videos").first();
         const latestStats = await env.ai_ceo_memory.prepare("SELECT subscriber_count, view_count, video_count, recorded_at FROM channel_stats ORDER BY id DESC LIMIT 1").first();
 
@@ -1521,6 +1522,7 @@ export default {
           videos_awaiting_publish: readyVideos?.cnt || 0,
           unused_content_plans_backlog: backlogPlans?.cnt || 0,
           analyzer_backlog: analyzerBacklog?.cnt || 0,
+          analyzer_failed: analyzerFailed?.cnt || 0,
           videos_removed_for_moderation: removedVideos?.cnt || 0,
           channel_stats: latestStats || null,
           monetization_progress: monetizationProgress,
@@ -2813,6 +2815,19 @@ Respond with only the reflection, no preamble.`;
         } catch (alertErr) {
           console.log("Non-fatal: could not log analyzer failure to system_alerts:", alertErr.message);
         }
+        try {
+          const updatedRow = await env.ai_ceo_memory.prepare(
+            "UPDATE analyzer_inputs SET attempt_count = attempt_count + 1 WHERE id = ? RETURNING attempt_count"
+          ).bind(pendingAnalyzerInput.id).first();
+          if (updatedRow && updatedRow.attempt_count >= 3) {
+            await env.ai_ceo_memory.prepare(
+              "UPDATE analyzer_inputs SET status = ? WHERE id = ?"
+            ).bind("failed", pendingAnalyzerInput.id).run();
+            console.log(`analyzer_input_id=${pendingAnalyzerInput.id} failed ${updatedRow.attempt_count} times, marking as permanently failed and advancing the queue`);
+          }
+        } catch (attemptErr) {
+          console.log("Non-fatal: could not update attempt_count:", attemptErr.message);
+        }
       }
       console.log("scheduled() completed successfully");
     } catch (outerErr) {
@@ -2820,6 +2835,9 @@ Respond with only the reflection, no preamble.`;
     }
   }
 };
+
+
+
 
 
 
