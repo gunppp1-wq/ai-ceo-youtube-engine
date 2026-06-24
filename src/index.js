@@ -1240,9 +1240,11 @@ async function checkNeuronBudgetCustomCost(env, estimatedCost) {
 }
 
 function estimateAnalyzerCost(durationSeconds) {
+  const VISION_ANALYSIS_PER_FRAME = 150;
+  const AUDIO_TRANSCRIPTION_BASE = 600;
   const frameCount = Math.ceil(durationSeconds / 2);
-  const visionCost = frameCount * (ESTIMATED_NEURON_COST.image_generation || 700);
-  const transcriptionCost = ESTIMATED_NEURON_COST.tts || 8200;
+  const visionCost = frameCount * VISION_ANALYSIS_PER_FRAME;
+  const transcriptionCost = AUDIO_TRANSCRIPTION_BASE;
   const llmCost = 2 * (ESTIMATED_NEURON_COST.text_generation || 150);
   return visionCost + transcriptionCost + llmCost;
 }
@@ -3027,6 +3029,7 @@ Respond with only the reflection, no preamble.`;
     }
   }
 };
+
 
 
 
