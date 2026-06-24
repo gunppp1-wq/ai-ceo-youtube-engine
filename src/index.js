@@ -730,19 +730,28 @@ REASONING: <your reasoning>`;
 }
 
 async function critiqueScriptOriginality(env, script, title) {
-  const critiquePrompt = `You are a strict, skeptical content critic reviewing a YouTube Shorts script BEFORE it gets published. Your job is to catch generic, templated, or low-effort writing that would feel like "AI slop" to a real viewer.
+  const recentPlans = await env.ai_ceo_memory.prepare(
+    "SELECT title FROM content_plans WHERE script IS NOT NULL ORDER BY id DESC LIMIT 15"
+  ).all();
+  const recentTitles = recentPlans.results.map(r => r.title).join("; ");
+
+  const critiquePrompt = `You are a strict, skeptical content critic reviewing a YouTube Shorts script BEFORE it gets published. Your job is to catch generic, templated, or low-effort writing that would feel like "AI slop" to a real viewer, AND to catch content that's too similar to what's already been covered recently.
 
 Title: ${title}
 Script: ${script}
+
+Recently covered topics/titles on this channel (for novelty comparison): ${recentTitles || "none yet"}
 
 Evaluate honestly:
 1. Does this sound like a real person with an opinion, or like a generic template filled with this topic's name swapped in?
 2. Are there any cliche phrases that overused AI-generated content tends to use (e.g. "here we go again", "let's be real", excessive rhetorical questions stacked together)?
 3. Does the ending feel like a genuine conclusion, or does it trail off generically?
+4. NOVELTY CHECK: is this title/topic too similar in subject, angle, or structure to anything in the recent list above? Score 0.0 (basically a repeat) to 1.0 (completely fresh territory).
 
 Respond in exactly this format:
 VERDICT: PASS or REVISE
-REASON: <one sentence explaining your verdict>`;
+REASON: <one sentence explaining your verdict>
+NOVELTY_SCORE: <a number 0.0 to 1.0>`;
 
   const critiqueResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
     messages: [{ role: "user", content: critiquePrompt }]
@@ -751,10 +760,16 @@ REASON: <one sentence explaining your verdict>`;
   const responseText = critiqueResponse.response || "";
   const verdictMatch = responseText.match(/VERDICT:\s*(PASS|REVISE)/i);
   const reasonMatch = responseText.match(/REASON:\s*(.+)/i);
+  const noveltyMatch = responseText.match(/NOVELTY_SCORE:\s*([\d.]+)/i);
+
+  const noveltyScore = noveltyMatch ? parseFloat(noveltyMatch[1]) : 1.0;
+  const writingPasses = verdictMatch ? verdictMatch[1].toUpperCase() === "PASS" : true;
+  const NOVELTY_THRESHOLD = 0.3;
 
   return {
-    passes: verdictMatch ? verdictMatch[1].toUpperCase() === "PASS" : true,
-    reason: reasonMatch ? reasonMatch[1].trim() : "No reason provided"
+    passes: writingPasses && noveltyScore >= NOVELTY_THRESHOLD,
+    reason: reasonMatch ? reasonMatch[1].trim() : "No reason provided",
+    noveltyScore: noveltyScore
   };
 }
 
@@ -2931,6 +2946,7 @@ Respond with only the reflection, no preamble.`;
     }
   }
 };
+
 
 
 
