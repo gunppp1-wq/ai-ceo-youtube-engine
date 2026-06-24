@@ -1972,6 +1972,13 @@ export default {
           console.log(`Video fully assembled for content_plan_id=${contentPlanId}: ${finalVideoFileName} (fileId: ${assembleResult.fileId})`);
         } catch (videoErr) {
           console.log(`ERROR generating/uploading video assets for content_plan_id=${contentPlanId}:`, videoErr.message);
+          try {
+            await env.ai_ceo_memory.prepare(
+              "INSERT INTO system_alerts (alert_type, message) VALUES (?, ?)"
+            ).bind("ASSET_GENERATION_FAILED", `content_plan_id=${contentPlanId}: ${videoErr.message}`).run();
+          } catch (alertErr) {
+            console.log("Non-fatal: could not log asset generation failure to system_alerts:", alertErr.message);
+          }
         }
       }
 
@@ -2270,6 +2277,7 @@ Respond with only the reflection, no preamble.`;
     }
   }
 };
+
 
 
 
