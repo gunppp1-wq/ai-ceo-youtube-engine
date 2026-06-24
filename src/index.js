@@ -373,6 +373,48 @@ Given this data (which may still be very early/limited), is the current trajecto
   return (aiResponse.response || "").trim();
 }
 
+async function extractFramesChunked(env, videoUrl, totalDurationSeconds, b2KeyId, b2ApplicationKey, b2BucketId) {
+  const CHUNK_SECONDS = 1200;
+  let allFrames = [];
+  for (let startSeconds = 0; startSeconds < totalDurationSeconds; startSeconds += CHUNK_SECONDS) {
+    const chunkDuration = Math.min(CHUNK_SECONDS, totalDurationSeconds - startSeconds);
+    console.log(`Chunked extraction: processing window ${startSeconds}s-${startSeconds + chunkDuration}s...`);
+    const res = await fetch("https://ai-ceo-video-assembler.onrender.com/analyze-extract", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        videoUrl: videoUrl,
+        b2KeyId: b2KeyId,
+        b2ApplicationKey: b2ApplicationKey,
+        b2BucketId: b2BucketId,
+        startSeconds: startSeconds,
+        chunkDuration: chunkDuration
+      })
+    });
+    if (!res.ok) throw new Error(`Chunked extraction failed at ${startSeconds}s: ${res.status} ${await res.text()}`);
+    const data = await res.json();
+    allFrames = allFrames.concat(data.frames);
+  }
+  return allFrames;
+}
+
+async function extractAudioOnly(env, videoUrl, b2KeyId, b2ApplicationKey, b2BucketId) {
+  const res = await fetch("https://ai-ceo-video-assembler.onrender.com/analyze-extract", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      videoUrl: videoUrl,
+      b2KeyId: b2KeyId,
+      b2ApplicationKey: b2ApplicationKey,
+      b2BucketId: b2BucketId,
+      audioOnly: true
+    })
+  });
+  if (!res.ok) throw new Error(`Audio-only extraction failed: ${res.status} ${await res.text()}`);
+  const data = await res.json();
+  return data.audio;
+}
+
 async function probeVideoDuration(env, fileName) {
   const videoUrl = await getAnalyzerDownloadUrl(env, fileName);
   const res = await fetch("https://ai-ceo-video-assembler.onrender.com/video-duration", {
@@ -476,21 +518,32 @@ async function processAnalyzerInput(env, inputId) {
 
   const videoUrl = await getAnalyzerDownloadUrl(env, inputRow.b2_file_name);
 
-  console.log(`Calling Render /analyze-extract for analyzer_input_id=${inputId}...`);
-  const extractRes = await fetch("https://ai-ceo-video-assembler.onrender.com/analyze-extract", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      videoUrl: videoUrl,
-      b2KeyId: env.ANALYZER_B2_KEY_ID,
-      b2ApplicationKey: env.ANALYZER_B2_APPLICATION_KEY,
-      b2BucketId: env.ANALYZER_B2_BUCKET_ID
-    })
-  });
-  if (!extractRes.ok) throw new Error(`Render extraction failed: ${extractRes.status} ${await extractRes.text()}`);
-  const extractData = await extractRes.json();
-  const audioResult = extractData.audio;
-  const frameResults = extractData.frames;
+  const LONG_VIDEO_THRESHOLD_SECONDS = 3600;
+  const isLongVideo = inputRow.duration_seconds !== null && inputRow.duration_seconds > LONG_VIDEO_THRESHOLD_SECONDS;
+
+  let audioResult, frameResults;
+
+  if (isLongVideo) {
+    console.log(`analyzer_input_id=${inputId}: long video (${inputRow.duration_seconds}s) - using chunked extraction...`);
+    audioResult = await extractAudioOnly(env, videoUrl, env.ANALYZER_B2_KEY_ID, env.ANALYZER_B2_APPLICATION_KEY, env.ANALYZER_B2_BUCKET_ID);
+    frameResults = await extractFramesChunked(env, videoUrl, inputRow.duration_seconds, env.ANALYZER_B2_KEY_ID, env.ANALYZER_B2_APPLICATION_KEY, env.ANALYZER_B2_BUCKET_ID);
+  } else {
+    console.log(`Calling Render /analyze-extract for analyzer_input_id=${inputId}...`);
+    const extractRes = await fetch("https://ai-ceo-video-assembler.onrender.com/analyze-extract", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        videoUrl: videoUrl,
+        b2KeyId: env.ANALYZER_B2_KEY_ID,
+        b2ApplicationKey: env.ANALYZER_B2_APPLICATION_KEY,
+        b2BucketId: env.ANALYZER_B2_BUCKET_ID
+      })
+    });
+    if (!extractRes.ok) throw new Error(`Render extraction failed: ${extractRes.status} ${await extractRes.text()}`);
+    const extractData = await extractRes.json();
+    audioResult = extractData.audio;
+    frameResults = extractData.frames;
+  }
 
   console.log(`Transcribing extracted audio for analyzer_input_id=${inputId}...`);
   const audioDownloadUrl = await getAnalyzerDownloadUrl(env, audioResult.fileName);
@@ -2946,6 +2999,8 @@ Respond with only the reflection, no preamble.`;
     }
   }
 };
+
+
 
 
 
