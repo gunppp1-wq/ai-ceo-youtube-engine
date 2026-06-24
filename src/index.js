@@ -549,6 +549,14 @@ async function processAnalyzerInput(env, inputId) {
     console.log(`Non-fatal: cleanup failed for analyzer_input_id=${inputId}:`, cleanupErr.message);
   }
 
+  try {
+    await env.ai_ceo_memory.prepare(
+      "INSERT INTO system_alerts (alert_type, message) VALUES (?, ?)"
+    ).bind("ANALYZER_PROCESSING_SUCCESS", `analyzer_input_id=${inputId} mode=${inputRow.mode} pattern=${insight.pattern} confidence=${insight.confidence}`).run();
+  } catch (successAlertErr) {
+    console.log("Non-fatal: could not log analyzer success to system_alerts:", successAlertErr.message);
+  }
+
   await env.ai_ceo_memory.prepare(
     "UPDATE analyzer_inputs SET status = ? WHERE id = ?"
   ).bind("analyzed", inputId).run();
@@ -2810,6 +2818,7 @@ Respond with only the reflection, no preamble.`;
     }
   }
 };
+
 
 
 
