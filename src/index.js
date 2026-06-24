@@ -1617,6 +1617,7 @@ export default {
         const backlogPlans = await env.ai_ceo_memory.prepare("SELECT COUNT(*) as cnt FROM content_plans cp WHERE NOT EXISTS (SELECT 1 FROM videos v WHERE v.content_plan_id = cp.id)").first();
         const analyzerBacklog = await env.ai_ceo_memory.prepare("SELECT COUNT(*) as cnt FROM analyzer_inputs WHERE status = 'uploaded'").first();
         const analyzerFailed = await env.ai_ceo_memory.prepare("SELECT COUNT(*) as cnt FROM analyzer_inputs WHERE status = 'failed'").first();
+        const recentInstructions = await env.ai_ceo_memory.prepare("SELECT instruction_text, source_file, created_at FROM user_instructions ORDER BY id DESC LIMIT 10").all();
         const removedVideos = await env.ai_ceo_memory.prepare("SELECT COUNT(*) as cnt FROM removed_videos").first();
         const latestStats = await env.ai_ceo_memory.prepare("SELECT subscriber_count, view_count, video_count, recorded_at FROM channel_stats ORDER BY id DESC LIMIT 1").first();
 
@@ -1649,6 +1650,7 @@ export default {
           unused_content_plans_backlog: backlogPlans?.cnt || 0,
           analyzer_backlog: analyzerBacklog?.cnt || 0,
           analyzer_failed: analyzerFailed?.cnt || 0,
+          recent_instructions: recentInstructions.results || [],
           videos_removed_for_moderation: removedVideos?.cnt || 0,
           channel_stats: latestStats || null,
           monetization_progress: monetizationProgress,
@@ -3021,6 +3023,8 @@ Respond with only the reflection, no preamble.`;
     }
   }
 };
+
+
 
 
 
