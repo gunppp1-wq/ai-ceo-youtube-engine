@@ -1594,6 +1594,18 @@ export default {
       ).all();
       const competitorTitleExamples = topCompetitorTitles.results.map(r => r.video_title).join(", ");
 
+      let titlePatternHint = "";
+      try {
+        const recentTitlePattern = await env.ai_ceo_memory.prepare(
+          "SELECT analysis FROM title_pattern_insights ORDER BY id DESC LIMIT 1"
+        ).first();
+        if (recentTitlePattern && recentTitlePattern.analysis) {
+          titlePatternHint = recentTitlePattern.analysis;
+        }
+      } catch (patternHintErr) {
+        console.log("Non-fatal: could not fetch title pattern hint:", patternHintErr.message);
+      }
+
       const backlogCheck = await env.ai_ceo_memory.prepare(
         "SELECT COUNT(*) as cnt FROM content_plans cp WHERE NOT EXISTS (SELECT 1 FROM videos v WHERE v.content_plan_id = cp.id)"
       ).first();
@@ -1645,7 +1657,11 @@ export default {
               ? `\n\nFor reference, here are some currently high-performing video titles from similar commentary channels: ${competitorTitleExamples}. Use these only to understand what title styles and angles are resonating right now - do not copy them, write something original in your own voice.`
               : "";
 
-            const prompt = `${PERSONA}\n\nWrite a 20-25 second video script (just the spoken narration, no stage directions) about this trending topic: ${cleanTitle}.${memoryNote}${competitorNote}\n\nWrite this in a natural, conversational tone with appropriate punctuation for text-to-speech - use contractions, vary your rhythm, and write the way someone would actually speak out loud, not like formal writing.\n\n${selectedStructure}\n\nFor your HOOK specifically: ${selectedHookVariant.instruction}\n\nWriting style for text-to-speech: write the way you'd actually talk, not like an essay. Use short sentences. Use natural punctuation - commas, periods, dashes - to create pauses where you'd naturally pause speaking. Vary your sentence length: mix short punchy lines with slightly longer ones, the way real speech actually flows.\n\nAlso suggest a catchy, clickable video title under 60 characters that reflects your personality. For the TITLE specifically: ${selectedTitleVariant.instruction}\n\nFinally, describe 3 distinct visual scenes representing the subject matter, plus one SEPARATE thumbnail concept. For each scene, give: a single relevant emoji, and a short 3-5 word label phrase (not the title, never include literal words like "text" or "title"). For the thumbnail specifically, choose the single most dramatic, attention-grabbing emoji and phrase that captures the core hook of the video - this is what people see before clicking. Format your response exactly as:\nTITLE: <title>\nSCRIPT: <script>\nSCENE1_EMOJI: <emoji>\nSCENE1_LABEL: <short phrase>\nSCENE2_EMOJI: <emoji>\nSCENE2_LABEL: <short phrase>\nSCENE3_EMOJI: <emoji>\nSCENE3_LABEL: <short phrase>\nTHUMBNAIL_EMOJI: <emoji>\nTHUMBNAIL_LABEL: <short dramatic phrase>`;
+            const titlePatternNote = titlePatternHint
+              ? `\n\nObserved structural pattern currently performing well in this niche (a pattern to inform your approach, not specific examples to copy): ${titlePatternHint}`
+              : "";
+
+            const prompt = `${PERSONA}\n\nWrite a 20-25 second video script (just the spoken narration, no stage directions) about this trending topic: ${cleanTitle}.${memoryNote}${competitorNote}${titlePatternNote}\n\nWrite this in a natural, conversational tone with appropriate punctuation for text-to-speech - use contractions, vary your rhythm, and write the way someone would actually speak out loud, not like formal writing.\n\n${selectedStructure}\n\nFor your HOOK specifically: ${selectedHookVariant.instruction}\n\nWriting style for text-to-speech: write the way you'd actually talk, not like an essay. Use short sentences. Use natural punctuation - commas, periods, dashes - to create pauses where you'd naturally pause speaking. Vary your sentence length: mix short punchy lines with slightly longer ones, the way real speech actually flows.\n\nAlso suggest a catchy, clickable video title under 60 characters that reflects your personality. For the TITLE specifically: ${selectedTitleVariant.instruction}\n\nFinally, describe 3 distinct visual scenes representing the subject matter, plus one SEPARATE thumbnail concept. For each scene, give: a single relevant emoji, and a short 3-5 word label phrase (not the title, never include literal words like "text" or "title"). For the thumbnail specifically, choose the single most dramatic, attention-grabbing emoji and phrase that captures the core hook of the video - this is what people see before clicking. Format your response exactly as:\nTITLE: <title>\nSCRIPT: <script>\nSCENE1_EMOJI: <emoji>\nSCENE1_LABEL: <short phrase>\nSCENE2_EMOJI: <emoji>\nSCENE2_LABEL: <short phrase>\nSCENE3_EMOJI: <emoji>\nSCENE3_LABEL: <short phrase>\nTHUMBNAIL_EMOJI: <emoji>\nTHUMBNAIL_LABEL: <short dramatic phrase>`;
 
             const aiResponse = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
               messages: [{ role: "user", content: prompt }]
@@ -1892,7 +1908,19 @@ export default {
           }
 
           if (!thumbBytes) {
-            const thumbnailPrompt = `${thumbnailDescription.label}, dramatic high-contrast lighting, single clear focal point, rule of thirds composition, vibrant saturated colors, professional photography style, eye-catching`;
+            let competitorThumbnailHint = "";
+            try {
+              const recentThumbInsight = await env.ai_ceo_memory.prepare(
+                "SELECT analysis FROM thumbnail_insights ORDER BY id DESC LIMIT 1"
+              ).first();
+              if (recentThumbInsight && recentThumbInsight.analysis) {
+                competitorThumbnailHint = `, inspired by this observed pattern in high-performing thumbnails: ${recentThumbInsight.analysis}`;
+              }
+            } catch (hintErr) {
+              console.log("Non-fatal: could not fetch thumbnail insight hint:", hintErr.message);
+            }
+
+            const thumbnailPrompt = `${thumbnailDescription.label}, dramatic high-contrast lighting, single clear focal point, rule of thirds composition, vibrant saturated colors, professional photography style, eye-catching${competitorThumbnailHint}`;
             const thumbResp = await env.AI.run("@cf/black-forest-labs/flux-1-schnell", {
               prompt: thumbnailPrompt
             });
@@ -2242,6 +2270,10 @@ Respond with only the reflection, no preamble.`;
     }
   }
 };
+
+
+
+
 
 
 
