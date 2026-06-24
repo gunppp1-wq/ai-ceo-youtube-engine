@@ -373,6 +373,18 @@ Given this data (which may still be very early/limited), is the current trajecto
   return (aiResponse.response || "").trim();
 }
 
+async function probeVideoDuration(env, fileName) {
+  const videoUrl = await getAnalyzerDownloadUrl(env, fileName);
+  const res = await fetch("https://ai-ceo-video-assembler.onrender.com/video-duration", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ videoUrl: videoUrl })
+  });
+  if (!res.ok) throw new Error(`Duration probe failed: ${res.status} ${await res.text()}`);
+  const data = await res.json();
+  return data.durationSeconds;
+}
+
 async function getAnalyzerDownloadUrl(env, fileName) {
   const authData = await b2Authorize(env, env.ANALYZER_B2_KEY_ID, env.ANALYZER_B2_APPLICATION_KEY);
   const downloadUrlBase = authData.apiInfo.storageApi.downloadUrl;
@@ -1120,6 +1132,39 @@ const ESTIMATED_NEURON_COST = {
   tts: 8200,
   image_generation: 700
 };
+
+async function checkNeuronBudgetCustomCost(env, estimatedCost) {
+  const today = new Date().toISOString().slice(0, 10);
+  const row = await env.ai_ceo_memory.prepare(
+    "SELECT count FROM daily_usage WHERE usage_date = ? AND op_type = ?"
+  ).bind(today, "neurons_estimated").first();
+
+  const usedSoFar = row ? row.count : 0;
+
+  if (usedSoFar + estimatedCost > DAILY_NEURON_BUDGET) {
+    return false;
+  }
+
+  if (row) {
+    await env.ai_ceo_memory.prepare(
+      "UPDATE daily_usage SET count = count + ? WHERE usage_date = ? AND op_type = ?"
+    ).bind(estimatedCost, today, "neurons_estimated").run();
+  } else {
+    await env.ai_ceo_memory.prepare(
+      "INSERT INTO daily_usage (usage_date, op_type, count) VALUES (?, ?, ?)"
+    ).bind(today, "neurons_estimated", estimatedCost).run();
+  }
+
+  return true;
+}
+
+function estimateAnalyzerCost(durationSeconds) {
+  const frameCount = Math.ceil(durationSeconds / 2);
+  const visionCost = frameCount * (ESTIMATED_NEURON_COST.image_generation || 700);
+  const transcriptionCost = ESTIMATED_NEURON_COST.tts || 8200;
+  const llmCost = 2 * (ESTIMATED_NEURON_COST.text_generation || 150);
+  return visionCost + transcriptionCost + llmCost;
+}
 
 async function checkNeuronBudget(env, operationType) {
   const today = new Date().toISOString().slice(0, 10);
@@ -2799,22 +2844,73 @@ Respond with only the reflection, no preamble.`;
       }
 
       try {
-        const pendingAnalyzerInput = await env.ai_ceo_memory.prepare(
-          "SELECT id FROM analyzer_inputs WHERE status = 'uploaded' ORDER BY id ASC LIMIT 1"
-        ).first();
-        if (pendingAnalyzerInput) {
-          console.log(`Processing analyzer_input_id=${pendingAnalyzerInput.id}...`);
-          await processAnalyzerInput(env, pendingAnalyzerInput.id);
+        const pendingInputs = await env.ai_ceo_memory.prepare(
+          "SELECT id, b2_file_name, duration_seconds, attempt_count FROM analyzer_inputs WHERE status = 'uploaded' ORDER BY id ASC LIMIT 50"
+        ).all();
+
+        for (const inputRow of pendingInputs.results) {
+          if (inputRow.duration_seconds === null) {
+            try {
+              const probed = await probeVideoDuration(env, inputRow.b2_file_name);
+              await env.ai_ceo_memory.prepare(
+                "UPDATE analyzer_inputs SET duration_seconds = ? WHERE id = ?"
+              ).bind(probed, inputRow.id).run();
+              inputRow.duration_seconds = probed;
+              console.log(`Probed duration for analyzer_input_id=${inputRow.id}: ${probed}s`);
+            } catch (probeErr) {
+              console.log(`Non-fatal: duration probe failed for analyzer_input_id=${inputRow.id}:`, probeErr.message);
+            }
+          }
         }
+
+        const probedInputs = pendingInputs.results.filter(r => r.duration_seconds !== null);
+        const unprobedInputs = pendingInputs.results.filter(r => r.duration_seconds === null);
+        probedInputs.sort((a, b) => a.duration_seconds - b.duration_seconds);
+        const orderedInputs = [...probedInputs, ...unprobedInputs];
+
+        let processedCount = 0;
+        for (const inputRow of orderedInputs) {
+          const estimatedCost = inputRow.duration_seconds !== null
+            ? estimateAnalyzerCost(inputRow.duration_seconds)
+            : (ESTIMATED_NEURON_COST.tts || 8200);
+
+          const canAfford = await checkNeuronBudgetCustomCost(env, estimatedCost);
+          if (!canAfford) {
+            console.log(`Skipping analyzer_input_id=${inputRow.id} this tick: estimated cost ${estimatedCost} would exceed remaining daily budget`);
+            continue;
+          }
+
+          console.log(`Processing analyzer_input_id=${inputRow.id} (duration=${inputRow.duration_seconds}s, estimated cost=${estimatedCost})...`);
+          try {
+            await processAnalyzerInput(env, inputRow.id);
+            processedCount++;
+          } catch (itemErr) {
+            console.log(`Non-fatal: analyzer input processing failed for id=${inputRow.id}:`, itemErr.message);
+            try {
+              await env.ai_ceo_memory.prepare(
+                "INSERT INTO system_alerts (alert_type, message) VALUES (?, ?)"
+              ).bind("ANALYZER_PROCESSING_FAILED", `analyzer_input_id=${inputRow.id}: ${itemErr.message}`).run();
+            } catch (alertErr) {
+              console.log("Non-fatal: could not log analyzer failure to system_alerts:", alertErr.message);
+            }
+            try {
+              const updatedRow = await env.ai_ceo_memory.prepare(
+                "UPDATE analyzer_inputs SET attempt_count = attempt_count + 1 WHERE id = ? RETURNING attempt_count"
+              ).bind(inputRow.id).first();
+              if (updatedRow && updatedRow.attempt_count >= 3) {
+                await env.ai_ceo_memory.prepare(
+                  "UPDATE analyzer_inputs SET status = ? WHERE id = ?"
+                ).bind("failed", inputRow.id).run();
+                console.log(`analyzer_input_id=${inputRow.id} failed ${updatedRow.attempt_count} times, marking as permanently failed`);
+              }
+            } catch (attemptErr) {
+              console.log("Non-fatal: could not update attempt_count:", attemptErr.message);
+            }
+          }
+        }
+        console.log(`Analyzer scheduling complete: processed ${processedCount} item(s) this tick`);
       } catch (analyzerErr) {
-        console.log("Non-fatal: analyzer input processing failed:", analyzerErr.message);
-        try {
-          await env.ai_ceo_memory.prepare(
-            "INSERT INTO system_alerts (alert_type, message) VALUES (?, ?)"
-          ).bind("ANALYZER_PROCESSING_FAILED", analyzerErr.message).run();
-        } catch (alertErr) {
-          console.log("Non-fatal: could not log analyzer failure to system_alerts:", alertErr.message);
-        }
+        console.log("Non-fatal: analyzer scheduling failed:", analyzerErr.message);
         try {
           const updatedRow = await env.ai_ceo_memory.prepare(
             "UPDATE analyzer_inputs SET attempt_count = attempt_count + 1 WHERE id = ? RETURNING attempt_count"
@@ -2835,6 +2931,9 @@ Respond with only the reflection, no preamble.`;
     }
   }
 };
+
+
+
 
 
 
