@@ -1198,7 +1198,70 @@ async function collectCompetitorInsights(env, query) {
   return insights;
 }
 
+async function parseTaughtTimePreference(env) {
+  const cached = await env.ai_ceo_memory.prepare(
+    "SELECT value, updated_at FROM taught_preferences WHERE key = 'publish_hour'"
+  ).first();
+
+  if (cached) {
+    const ageHours = (Date.now() - new Date(cached.updated_at + "Z").getTime()) / (1000 * 60 * 60);
+    if (ageHours < 24) {
+      return cached.value === "NONE" ? null : parseInt(cached.value, 10);
+    }
+  }
+
+  const recentInstructions = await env.ai_ceo_memory.prepare(
+    "SELECT instruction_text FROM user_instructions ORDER BY id DESC LIMIT 5"
+  ).all();
+
+  if (!recentInstructions.results || recentInstructions.results.length === 0) {
+    await env.ai_ceo_memory.prepare(
+      "INSERT INTO taught_preferences (key, value, updated_at) VALUES ('publish_hour', 'NONE', datetime('now')) ON CONFLICT(key) DO UPDATE SET value = 'NONE', updated_at = datetime('now')"
+    ).run();
+    return null;
+  }
+
+  const instructionList = recentInstructions.results.map(r => r.instruction_text).join(" | ");
+  const prompt = `Review these instructions from a YouTube channel operator. Does ANY of them specify a preferred publishing hour or time of day?
+
+Instructions: ${instructionList}
+
+Respond with EXACTLY one line:
+HOUR: <a number 0-23, representing UTC hour> or HOUR: NONE if no specific time/hour preference is mentioned.`;
+
+  const response = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+    messages: [{ role: "user", content: prompt }]
+  });
+  const text = response.response || "";
+  const match = text.match(/HOUR:\s*(\d+|NONE)/i);
+  const result = match ? match[1].toUpperCase() : "NONE";
+
+  await env.ai_ceo_memory.prepare(
+    "INSERT INTO taught_preferences (key, value, updated_at) VALUES ('publish_hour', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')"
+  ).bind(result, result).run();
+
+  return result === "NONE" ? null : parseInt(result, 10);
+}
+
 async function getNextRotationHour(env) {
+  try {
+    const taughtHour = await parseTaughtTimePreference(env);
+    if (taughtHour !== null) {
+      const recentUse = await env.ai_ceo_memory.prepare(
+        "SELECT last_used_at FROM publish_hour_rotation WHERE hour = ?"
+      ).bind(taughtHour).first();
+      const hoursSinceUsed = recentUse
+        ? (Date.now() - new Date(recentUse.last_used_at + "Z").getTime()) / (1000 * 60 * 60)
+        : 999;
+      if (hoursSinceUsed >= 12) {
+        console.log(`Using taught publish-hour preference: ${taughtHour} UTC`);
+        return taughtHour;
+      }
+    }
+  } catch (taughtHourErr) {
+    console.log("Non-fatal: could not check taught publish-hour preference:", taughtHourErr.message);
+  }
+
   for (let h = 0; h < 24; h++) {
     const row = await env.ai_ceo_memory.prepare(
       "SELECT hour FROM publish_hour_rotation WHERE hour = ?"
@@ -3042,6 +3105,8 @@ Respond with only the reflection, no preamble.`;
     }
   }
 };
+
+
 
 
 
