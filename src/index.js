@@ -798,6 +798,26 @@ async function analyzeThumbnail(env, imageUrl) {
   return (response.response || "").trim();
 }
 
+async function analyzeTitlePatterns(env, query, insights) {
+  if (insights.length === 0) return null;
+
+  const digest = insights.map((ins, i) =>
+    `${i + 1}. Title: "${ins.title}" | Views: ${ins.viewCount}${ins.description ? ` | Description: "${ins.description}"` : ""}${ins.tags && ins.tags.length > 0 ? ` | Tags: ${ins.tags.slice(0, 5).join(", ")}` : ""}`
+  ).join("\n");
+
+  const prompt = `You are analyzing YouTube Shorts titles and descriptions from top-performing videos in the niche: "${query}".
+
+${digest}
+
+Identify structural patterns across these titles and descriptions - NOT the specific topics, but the FORM: are titles phrased as questions, direct statements, or number/list framing? Is there a common hook style in descriptions? Any recurring tag themes? Respond in 2-3 sentences describing the patterns, not the content.`;
+
+  const response = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+    messages: [{ role: "user", content: prompt }]
+  });
+
+  return (response.response || "").trim();
+}
+
 async function collectCompetitorInsights(env, query) {
   const searchUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&order=viewCount&maxResults=10&q=${encodeURIComponent(query)}&key=${env.YOUTUBE_API_KEY}`;
   const searchRes = await fetch(searchUrl);
@@ -821,7 +841,9 @@ async function collectCompetitorInsights(env, query) {
     title: item.snippet.title,
     channelTitle: item.snippet.channelTitle,
     viewCount: parseInt(item.statistics.viewCount || "0", 10),
-    thumbnailUrl: (item.snippet.thumbnails && (item.snippet.thumbnails.high || item.snippet.thumbnails.medium || item.snippet.thumbnails.default)) ? (item.snippet.thumbnails.high || item.snippet.thumbnails.medium || item.snippet.thumbnails.default).url : null
+    thumbnailUrl: (item.snippet.thumbnails && (item.snippet.thumbnails.high || item.snippet.thumbnails.medium || item.snippet.thumbnails.default)) ? (item.snippet.thumbnails.high || item.snippet.thumbnails.medium || item.snippet.thumbnails.default).url : null,
+    description: (item.snippet.description || "").slice(0, 300),
+    tags: item.snippet.tags || []
   }));
 
   for (const insight of insights) {
@@ -848,6 +870,18 @@ async function collectCompetitorInsights(env, query) {
       }
       console.log(`Non-fatal: thumbnail analysis failed for "${top.title}":`, thumbErr.message);
     }
+  }
+
+  try {
+    const titlePatternAnalysis = await analyzeTitlePatterns(env, query, insights);
+    if (titlePatternAnalysis) {
+      await env.ai_ceo_memory.prepare(
+        "INSERT INTO title_pattern_insights (query, analysis, sample_size) VALUES (?, ?, ?)"
+      ).bind(query, titlePatternAnalysis, insights.length).run();
+      console.log(`Title pattern analysis for "${query}": ${titlePatternAnalysis}`);
+    }
+  } catch (patternErr) {
+    console.log(`Non-fatal: title pattern analysis failed for query "${query}":`, patternErr.message);
   }
 
   return insights;
@@ -2208,6 +2242,9 @@ Respond with only the reflection, no preamble.`;
     }
   }
 };
+
+
+
 
 
 
