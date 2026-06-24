@@ -773,6 +773,31 @@ async function getOwnChannelId(accessToken) {
   return data.items[0].id;
 }
 
+function arrayBufferToBase64(buffer) {
+  let binary = "";
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 8192;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function analyzeThumbnail(env, imageUrl) {
+  const imgRes = await fetch(imageUrl);
+  if (!imgRes.ok) throw new Error(`Thumbnail fetch failed: ${imgRes.status}`);
+  const buffer = await imgRes.arrayBuffer();
+  const base64 = arrayBufferToBase64(buffer);
+  const contentType = imgRes.headers.get("content-type") || "image/jpeg";
+
+  const response = await env.AI.run("@cf/meta/llama-3.2-11b-vision-instruct", {
+    messages: [{ role: "user", content: "Describe this YouTube Shorts thumbnail in 1-2 sentences: composition, color scheme, text overlay if any, and main focal point. Be specific and concise." }],
+    image: `data:${contentType};base64,${base64}`
+  });
+
+  return (response.response || "").trim();
+}
+
 async function collectCompetitorInsights(env, query) {
   const searchUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&order=viewCount&maxResults=10&q=${encodeURIComponent(query)}&key=${env.YOUTUBE_API_KEY}`;
   const searchRes = await fetch(searchUrl);
@@ -795,13 +820,34 @@ async function collectCompetitorInsights(env, query) {
   const insights = statsData.items.map(item => ({
     title: item.snippet.title,
     channelTitle: item.snippet.channelTitle,
-    viewCount: parseInt(item.statistics.viewCount || "0", 10)
+    viewCount: parseInt(item.statistics.viewCount || "0", 10),
+    thumbnailUrl: (item.snippet.thumbnails && (item.snippet.thumbnails.high || item.snippet.thumbnails.medium || item.snippet.thumbnails.default)) ? (item.snippet.thumbnails.high || item.snippet.thumbnails.medium || item.snippet.thumbnails.default).url : null
   }));
 
   for (const insight of insights) {
     await env.ai_ceo_memory.prepare(
       "INSERT INTO competitor_insights (query, video_title, view_count, channel_title) VALUES (?, ?, ?, ?)"
     ).bind(query, insight.title, insight.viewCount, insight.channelTitle).run();
+  }
+
+  const topByViews = [...insights].sort((a, b) => b.viewCount - a.viewCount).slice(0, 3);
+  for (const top of topByViews) {
+    if (!top.thumbnailUrl) continue;
+    try {
+      const analysis = await analyzeThumbnail(env, top.thumbnailUrl);
+      await env.ai_ceo_memory.prepare(
+        "INSERT INTO thumbnail_insights (video_title, channel_title, view_count, thumbnail_url, analysis) VALUES (?, ?, ?, ?, ?)"
+      ).bind(top.title, top.channelTitle, top.viewCount, top.thumbnailUrl, analysis).run();
+      console.log(`Thumbnail analyzed for "${top.title}": ${analysis}`);
+    } catch (thumbErr) {
+      const isLicenseIssue = thumbErr.message && thumbErr.message.toLowerCase().includes("agree");
+      if (isLicenseIssue) {
+        await env.ai_ceo_memory.prepare(
+          "INSERT INTO system_alerts (alert_type, message) VALUES (?, ?)"
+        ).bind("VISION_MODEL_LICENSE_NEEDED", "The vision model (@cf/meta/llama-3.2-11b-vision-instruct) requires one-time license agreement. Send a request with {\"prompt\": \"agree\"} to this model via the Cloudflare dashboard or API to enable it.").run();
+      }
+      console.log(`Non-fatal: thumbnail analysis failed for "${top.title}":`, thumbErr.message);
+    }
   }
 
   return insights;
@@ -2162,6 +2208,8 @@ Respond with only the reflection, no preamble.`;
     }
   }
 };
+
+
 
 
 
