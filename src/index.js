@@ -87,7 +87,7 @@ async function generateSpeechViaPiper(env, text) {
   const renderUrl = "https://ai-ceo-video-assembler.onrender.com";
   try {
     const healthRes = await fetch(`${renderUrl}/generate-speech/health`, {
-      signal: AbortSignal.timeout(5000)
+      signal: AbortSignal.timeout(20000)
     });
     if (!healthRes.ok) {
       console.log("[piper] health check failed, falling back to Aura-2");
@@ -2661,7 +2661,7 @@ export default {
 
           let piperIsAvailable = false;
           try {
-            const piperHealthRes = await fetch("https://ai-ceo-video-assembler.onrender.com/generate-speech/health", { signal: AbortSignal.timeout(5000) });
+            const piperHealthRes = await fetch("https://ai-ceo-video-assembler.onrender.com/generate-speech/health", { signal: AbortSignal.timeout(20000) });
             if (piperHealthRes.ok) {
               const piperHealth = await piperHealthRes.json();
               piperIsAvailable = !!piperHealth.ready;
@@ -3272,6 +3272,7 @@ Respond with only the reflection, no preamble.`;
     }
   }
 };
+
 
 
 
