@@ -2695,6 +2695,7 @@ export default {
           await page.setViewport({ width: 1080, height: 1920 });
 
           const sceneFrameUrls = [];
+          const sceneVideoUrls = [];
           try {
             for (let sceneIdx = 0; sceneIdx < sceneDescriptions.length; sceneIdx++) {
               const motionType = MOTION_TYPES[(contentPlanId + sceneIdx) % MOTION_TYPES.length];
