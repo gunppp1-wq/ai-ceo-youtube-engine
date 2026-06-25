@@ -1361,6 +1361,9 @@ const ESTIMATED_NEURON_COST = {
 };
 
 async function checkNeuronBudgetCustomCost(env, estimatedCost) {
+  const POSTING_RESERVE = ESTIMATED_NEURON_COST.tts || 8200;
+  const effectiveBudgetForAnalyzer = DAILY_NEURON_BUDGET - POSTING_RESERVE;
+
   const today = new Date().toISOString().slice(0, 10);
   const row = await env.ai_ceo_memory.prepare(
     "SELECT count FROM daily_usage WHERE usage_date = ? AND op_type = ?"
@@ -1368,7 +1371,7 @@ async function checkNeuronBudgetCustomCost(env, estimatedCost) {
 
   const usedSoFar = row ? row.count : 0;
 
-  if (usedSoFar + estimatedCost > DAILY_NEURON_BUDGET) {
+  if (usedSoFar + estimatedCost > effectiveBudgetForAnalyzer) {
     return false;
   }
 
@@ -3214,6 +3217,7 @@ Respond with only the reflection, no preamble.`;
     }
   }
 };
+
 
 
 
