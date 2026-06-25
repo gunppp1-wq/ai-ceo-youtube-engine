@@ -2659,10 +2659,25 @@ export default {
             continue;
           }
 
-          const canProceedNeuronBudget = await checkNeuronBudget(env, "tts");
-          if (!canProceedNeuronBudget) {
-            console.log(`Skipping asset generation for content_plan_id=${contentPlanId}: estimated neuron budget exhausted for today`);
-            continue;
+          let piperIsAvailable = false;
+          try {
+            const piperHealthRes = await fetch("https://ai-ceo-video-assembler.onrender.com/generate-speech/health", { signal: AbortSignal.timeout(5000) });
+            if (piperHealthRes.ok) {
+              const piperHealth = await piperHealthRes.json();
+              piperIsAvailable = !!piperHealth.ready;
+            }
+          } catch (piperHealthErr) {
+            console.log("Non-fatal: piper health check failed before budget gate:", piperHealthErr.message);
+          }
+
+          if (!piperIsAvailable) {
+            const canProceedNeuronBudget = await checkNeuronBudget(env, "tts");
+            if (!canProceedNeuronBudget) {
+              console.log(`Skipping asset generation for content_plan_id=${contentPlanId}: estimated neuron budget exhausted for today (piper unavailable, would need Aura-2)`);
+              continue;
+            }
+          } else {
+            console.log(`Piper available for content_plan_id=${contentPlanId}, skipping Cloudflare neuron-budget reservation for TTS`);
           }
 
           let audioBytes = await generateSpeechViaPiper(env, generatedScript);
