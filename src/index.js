@@ -667,6 +667,56 @@ async function getAnalyzerUploadUrl(env, fileName) {
   };
 }
 
+async function getTaughtVariantPreference(env, variantList, variantTypeLabel) {
+  const cacheKey = `variant_preference_${variantTypeLabel}`;
+  const cached = await env.ai_ceo_memory.prepare(
+    "SELECT value, updated_at FROM taught_preferences WHERE key = ?"
+  ).bind(cacheKey).first();
+
+  if (cached) {
+    const ageHours = (Date.now() - new Date(cached.updated_at + "Z").getTime()) / (1000 * 60 * 60);
+    if (ageHours < 24) {
+      return cached.value === "NONE" ? null : variantList.find(v => v.id === cached.value) || null;
+    }
+  }
+
+  const recentInstructions = await env.ai_ceo_memory.prepare(
+    "SELECT instruction_text FROM user_instructions ORDER BY id DESC LIMIT 5"
+  ).all();
+
+  if (!recentInstructions.results || recentInstructions.results.length === 0) {
+    await env.ai_ceo_memory.prepare(
+      "INSERT INTO taught_preferences (key, value, updated_at) VALUES (?, 'NONE', datetime('now')) ON CONFLICT(key) DO UPDATE SET value = 'NONE', updated_at = datetime('now')"
+    ).bind(cacheKey).run();
+    return null;
+  }
+
+  const instructionList = recentInstructions.results.map(r => r.instruction_text).join(" | ");
+  const optionsList = variantList.map(v => `${v.id}: ${v.instruction}`).join("\n");
+  const prompt = `Review these instructions from a YouTube channel operator. Do any of them express a preference that matches one of these specific style options?
+
+Instructions: ${instructionList}
+
+Options:
+${optionsList}
+
+Respond with EXACTLY one line: MATCH: <option id> or MATCH: NONE if no instruction clearly matches one of these specific options.`;
+
+  const response = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+    messages: [{ role: "user", content: prompt }]
+  });
+  const text = response.response || "";
+  const match = text.match(/MATCH:\s*(\S+)/i);
+  const result = match ? match[1] : "NONE";
+  const validResult = variantList.find(v => v.id === result) ? result : "NONE";
+
+  await env.ai_ceo_memory.prepare(
+    "INSERT INTO taught_preferences (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')"
+  ).bind(cacheKey, validResult, validResult).run();
+
+  return validResult === "NONE" ? null : variantList.find(v => v.id === validResult);
+}
+
 async function selectTitleVariant(env) {
   const MIN_SAMPLE_SIZE = 5;
   const performanceRows = await env.ai_ceo_memory.prepare(`
@@ -688,6 +738,16 @@ async function selectTitleVariant(env) {
       console.log(`Title variant selected by performance: ${bestVariant.id} (avg_views=${best.avg_views.toFixed(1)}, n=${best.sample_size})`);
       return bestVariant;
     }
+  }
+
+  try {
+    const taughtVariant = await getTaughtVariantPreference(env, TITLE_STYLE_VARIANTS, "title_style");
+    if (taughtVariant) {
+      console.log(`Title variant selected by taught preference: ${taughtVariant.id} (not enough performance data yet to override)`);
+      return taughtVariant;
+    }
+  } catch (taughtVariantErr) {
+    console.log("Non-fatal: could not check taught title-variant preference:", taughtVariantErr.message);
   }
 
   const variantCounts = await env.ai_ceo_memory.prepare(
@@ -733,6 +793,16 @@ async function selectHookVariant(env) {
       console.log(`Hook variant selected by performance: ${bestVariant.id} (avg_duration=${best.avg_duration.toFixed(1)}s, n=${best.sample_size})`);
       return bestVariant;
     }
+  }
+
+  try {
+    const taughtVariant = await getTaughtVariantPreference(env, HOOK_INTENSITY_VARIANTS, "hook_intensity");
+    if (taughtVariant) {
+      console.log(`Hook variant selected by taught preference: ${taughtVariant.id} (not enough performance data yet to override)`);
+      return taughtVariant;
+    }
+  } catch (taughtVariantErr) {
+    console.log("Non-fatal: could not check taught hook-variant preference:", taughtVariantErr.message);
   }
 
   const variantCounts = await env.ai_ceo_memory.prepare(
@@ -3105,6 +3175,9 @@ Respond with only the reflection, no preamble.`;
     }
   }
 };
+
+
+
 
 
 
