@@ -83,6 +83,39 @@ async function callRenderAssembler(payload) {
   }
 }
 
+async function generateSpeechViaPiper(env, text) {
+  const renderUrl = "https://ai-ceo-video-assembler.onrender.com";
+  try {
+    const healthRes = await fetch(`${renderUrl}/generate-speech/health`, {
+      signal: AbortSignal.timeout(5000)
+    });
+    if (!healthRes.ok) {
+      console.log("[piper] health check failed, falling back to Aura-2");
+      return null;
+    }
+    const health = await healthRes.json();
+    if (!health.ready) {
+      console.log("[piper] piper reports not ready, falling back to Aura-2");
+      return null;
+    }
+    const genRes = await fetch(`${renderUrl}/generate-speech`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+      signal: AbortSignal.timeout(60000)
+    });
+    if (!genRes.ok) {
+      const detail = await genRes.text().catch(() => "");
+      console.log(`[piper] generation failed (status ${genRes.status}): ${detail}`);
+      return null;
+    }
+    const audioArrayBuffer = await genRes.arrayBuffer();
+    return new Uint8Array(audioArrayBuffer);
+  } catch (err) {
+    console.log("[piper] unexpected error, falling back to Aura-2:", err.message);
+    return null;
+  }
+}
 async function getYoutubeAccessToken(env) {
   let refreshToken = env.YOUTUBE_REFRESH_TOKEN;
 
@@ -2632,17 +2665,23 @@ export default {
             continue;
           }
 
-          const AURA2_VOICES = ["luna", "asteria", "athena", "hera", "aurora", "iris", "thalia", "orion", "apollo", "atlas"];
-          const selectedVoice = AURA2_VOICES[contentPlanId % AURA2_VOICES.length];
-          console.log(`Using voice: ${selectedVoice} for content_plan_id=${contentPlanId}`);
+          let audioBytes = await generateSpeechViaPiper(env, generatedScript);
 
-          const ttsResp = await env.AI.run("@cf/deepgram/aura-2-en", {
-            text: generatedScript,
-            speaker: selectedVoice
-          }, { returnRawResponse: true });
+          if (audioBytes) {
+            console.log(`Using Piper TTS for content_plan_id=${contentPlanId}`);
+          } else {
+            const AURA2_VOICES = ["luna", "asteria", "athena", "hera", "aurora", "iris", "thalia", "orion", "apollo", "atlas"];
+            const selectedVoice = AURA2_VOICES[contentPlanId % AURA2_VOICES.length];
+            console.log(`Piper unavailable, falling back to Aura-2 voice: ${selectedVoice} for content_plan_id=${contentPlanId}`);
 
-          const audioArrayBuffer = await ttsResp.arrayBuffer();
-          const audioBytes = new Uint8Array(audioArrayBuffer);
+            const ttsResp = await env.AI.run("@cf/deepgram/aura-2-en", {
+              text: generatedScript,
+              speaker: selectedVoice
+            }, { returnRawResponse: true });
+
+            const audioArrayBuffer = await ttsResp.arrayBuffer();
+            audioBytes = new Uint8Array(audioArrayBuffer);
+          }
 
           const authData = await b2Authorize(env);
           const apiUrl = authData.apiInfo.storageApi.apiUrl;
@@ -3217,6 +3256,9 @@ Respond with only the reflection, no preamble.`;
     }
   }
 };
+
+
+
 
 
 
