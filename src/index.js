@@ -1835,10 +1835,40 @@ export default {
           return new Response(JSON.stringify({ error: "fileName is required" }), { status: 400, headers: { "Content-Type": "application/json" } });
         }
         const mode = (body.mode === "teach") ? "teach" : "analyze";
+        const matchField = body.b2FileId ? "b2_file_id" : "b2_file_name";
+        const matchValue = body.b2FileId || body.fileName;
+
+        const existingSameMode = await env.ai_ceo_memory.prepare(
+          `SELECT id FROM analyzer_inputs WHERE ${matchField} = ? AND mode = ? AND status IN ('uploaded', 'analyzed')`
+        ).bind(matchValue, mode).first();
+
+        if (existingSameMode) {
+          return new Response(JSON.stringify({ error: "DUPLICATE_SAME_MODE", message: "This exact video has already been uploaded in this mode - skipping to avoid wasting budget on a redundant analysis." }), { status: 409, headers: { "Content-Type": "application/json" } });
+        }
+
+        const existingDifferentMode = await env.ai_ceo_memory.prepare(
+          `SELECT id, mode, status, b2_file_name FROM analyzer_inputs WHERE ${matchField} = ? AND mode != ? ORDER BY id DESC LIMIT 1`
+        ).bind(matchValue, mode).first();
+
+        let correctionNote = null;
+        if (existingDifferentMode) {
+          if (existingDifferentMode.mode === "teach" && existingDifferentMode.status === "analyzed") {
+            await env.ai_ceo_memory.prepare(
+              "DELETE FROM user_instructions WHERE source_file = ?"
+            ).bind(existingDifferentMode.b2_file_name).run();
+            console.log(`Mode correction: deleted taught instruction(s) from source_file=${existingDifferentMode.b2_file_name} (was wrongly taught, now re-fed as ${mode})`);
+          }
+          await env.ai_ceo_memory.prepare(
+            "DELETE FROM analyzer_inputs WHERE id = ?"
+          ).bind(existingDifferentMode.id).run();
+          correctionNote = `Corrected: removed previous ${existingDifferentMode.mode}-mode entry${existingDifferentMode.mode === "teach" ? " and any taught instruction from it" : ""} for this video.`;
+          console.log(`Mode correction: removed old analyzer_inputs id=${existingDifferentMode.id} (mode=${existingDifferentMode.mode}) in favor of new mode=${mode}`);
+        }
+
         const insertResult = await env.ai_ceo_memory.prepare(
           "INSERT INTO analyzer_inputs (b2_file_name, niche_tag, status, mode, b2_file_id) VALUES (?, ?, ?, ?, ?) RETURNING id"
         ).bind(body.fileName, body.nicheTag || null, "uploaded", mode, body.b2FileId || null).first();
-        return new Response(JSON.stringify({ success: true, id: insertResult.id }), { headers: { "Content-Type": "application/json" } });
+        return new Response(JSON.stringify({ success: true, id: insertResult.id, correctionNote: correctionNote }), { headers: { "Content-Type": "application/json" } });
       } catch (registerErr) {
         return new Response(JSON.stringify({ error: registerErr.message }), { status: 500, headers: { "Content-Type": "application/json" } });
       }
@@ -2120,8 +2150,17 @@ export default {
           body: JSON.stringify({ fileName: fileName, nicheTag: nicheTag.value.trim() || null, mode: currentMode, b2FileId: b2FileId })
         });
       } catch (e) { throw new Error('STEP3-register: ' + e.message); }
-      if (!registerRes.ok) throw new Error('STEP3-register: HTTP ' + registerRes.status);
-      updateQueueItem(itemId, 'done', 'queued for analysis');
+      if (!registerRes.ok) {
+        let errMsg = 'STEP3-register: HTTP ' + registerRes.status;
+        try {
+          const errBody = await registerRes.json();
+          if (errBody.message) errMsg = errBody.message;
+        } catch (parseErr) {}
+        throw new Error(errMsg);
+      }
+      const registerResultData = await registerRes.json();
+      const successLabel = registerResultData.correctionNote ? registerResultData.correctionNote : 'queued for analysis';
+      updateQueueItem(itemId, 'done', successLabel);
     } catch (err) {
       updateQueueItem(itemId, 'error', err.message);
     }
@@ -3175,6 +3214,8 @@ Respond with only the reflection, no preamble.`;
     }
   }
 };
+
+
 
 
 
