@@ -1,6 +1,6 @@
-import puppeteer from "@cloudflare/puppeteer";
+﻿import puppeteer from "@cloudflare/puppeteer";
 import { passesPlatformSafetyGate, passesEconomicsGate, containsForbiddenPaymentField, MIN_PROFIT_SCORE, MIN_SCRIPT_LENGTH } from "./protected-core.js";
-import { openEntry, sweepExpiredEntries, revertAllOpenEntries } from "./self-mod-lifecycle.js";
+import { openEntry, sweepExpiredEntries } from "./self-mod-lifecycle.js";
 import { maybeProposePublishHourTrial, judgePublishHourTrial, rollbackPublishHourTrial } from "./publish-hour-self-mod.js";
 import { maybeProposeWorkersPlanUpgrade, recordBacklogSnapshot } from "./payment-proposal-trigger.js";
 import { proposeAndDeployCodeChange, judgeCodeChange, rollbackCodeChange } from "./code-self-mod.js";
@@ -1749,11 +1749,6 @@ function cleanImageDescription(desc) {
 // Teal design (as approved), inline SVG icons (no font dependency).
 // ============================================================
 
-// ============================================================
-// REPLACES the previous COMBINED_DASHBOARD_HTML entirely.
-// Teal design (as approved), inline SVG icons (no font dependency).
-// ============================================================
-
 const COMBINED_DASHBOARD_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1846,9 +1841,6 @@ const COMBINED_DASHBOARD_HTML = `<!DOCTYPE html>
   .key-paste-box button { width: 100%; background: var(--accent-dim); border: 1px solid var(--accent); color: var(--accent); border-radius: 6px; padding: 8px; font-size: 12px; font-weight: 500; cursor: pointer; }
   .key-status.error { color: #e2585a; font-size: 11px; margin-top: 6px; }
   .decision-locked { font-size: 12px; font-weight: 500; }
-  .precedent-box { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
-  .precedent-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--dim); font-weight: 600; }
-  .precedent-item { font-size: 11px; color: var(--muted); margin-top: 4px; }
   .btn-paid-confirm { width: 100%; margin-top: 8px; background: var(--accent-dim); border: 1px solid var(--accent); color: var(--accent); border-radius: 6px; padding: 8px; font-size: 12px; font-weight: 500; cursor: pointer; }
   .empty-state { text-align: center; padding: 50px 20px; font-size: 13px; color: var(--dim); }
 
@@ -2067,7 +2059,6 @@ const COMBINED_DASHBOARD_HTML = `<!DOCTYPE html>
   var payments = [];
   var decided = {};
   var keySaveState = {};
-  var precedentsCache = {}; // proposalId -> array of precedent rows
 
   function escapeHtml(str) {
     var div = document.createElement('div');
@@ -2117,16 +2108,6 @@ const COMBINED_DASHBOARD_HTML = `<!DOCTYPE html>
         '<p class="entry-title">' + escapeHtml(p.title) + '</p>' +
         '<p class="entry-desc">' + escapeHtml(p.description) + ' (' + escapeHtml(p.cost_summary) + ')</p>' +
         '<a href="' + p.payment_url + '" target="_blank" class="pay-link">Payment / signup page \\u2197</a>';
-
-      var precedents = precedentsCache[p.id];
-      if (precedents && precedents.length > 0) {
-        html += '<div class="precedent-box"><span class="precedent-label">Precedent</span>';
-        precedents.slice(0, 2).forEach(function(prec) {
-          var when = new Date(prec.decided_at * 1000).toLocaleDateString();
-          html += '<p class="precedent-item">' + when + ': ' + escapeHtml(prec.status) + '</p>';
-        });
-        html += '</div>';
-      }
 
       if (lock === 'approved') {
         if (isNewService) {
@@ -2212,17 +2193,6 @@ const COMBINED_DASHBOARD_HTML = `<!DOCTYPE html>
       entries = entriesRes;
       payments = paymentsRes;
       renderEntries();
-
-      // Fetch precedents for each pending payment proposal, then re-render
-      // once they're in. Done after the first render so the page shows
-      // something immediately rather than waiting on N extra requests.
-      await Promise.all(payments.map(async function(p) {
-        try {
-          var prec = await fetch('/self-mod/api/payments/' + p.id + '/precedents').then(function(r) { return r.json(); });
-          if (prec && prec.length > 0) precedentsCache[p.id] = prec;
-        } catch (e) { /* non-fatal, just skip precedent display for this one */ }
-      }));
-      renderEntries();
     } catch (e) { console.error('Failed to load self-mod data', e); }
   }
 
@@ -2307,20 +2277,7 @@ export default {
       return new Response(COMBINED_DASHBOARD_HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
     }
 
-    // ============================================================
-// TEMPORARY TEST ROUTE (v2) ? multi-concurrent-revert verification
-// Corrected version: inserts two test entries DIRECTLY via SQL,
-// bypassing openEntry()'s daily speed limit. That limit governs how
-// often NEW self-modifications may be proposed - it is not part of
-// what this test verifies. The actual unit under test is
-// revertAllOpenEntries(): does it revert EVERY open entry, not just
-// the one that triggered the failure. Isolating the test from the
-// unrelated rate-limit gate is the correct fix, not a workaround.
-//
-// DELETE THIS ROUTE after running the test once.
-// ============================================================
-
-if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
+    if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
       const { results } = await env.ai_ceo_memory
         .prepare("SELECT * FROM self_mod_entries WHERE status = 'open' ORDER BY opened_at DESC")
         .all();
@@ -2672,6 +2629,303 @@ if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
       } catch (registerErr) {
         return new Response(JSON.stringify({ error: registerErr.message }), { status: 500, headers: { "Content-Type": "application/json" } });
       }
+    }
+
+    if (url.pathname === "/analyzer/upload") {
+      return new Response(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Analyzer Intake</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+  :root {
+    --bg: #0E0F11;
+    --surface: #16181B;
+    --border: #25282D;
+    --text: #E7E8EA;
+    --text-dim: #6B7280;
+    --accent: #E8A23D;
+    --accent-dim: #E8A23D33;
+    --success: #4ADE80;
+    --error: #F87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', system-ui, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 64px 24px;
+  }
+  .header { text-align: center; margin-bottom: 48px; max-width: 480px; }
+  .header .eyebrow {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 12px;
+  }
+  .header h1 { font-size: 28px; font-weight: 600; margin: 0 0 8px 0; letter-spacing: -0.01em; }
+  .header p { color: var(--text-dim); font-size: 15px; line-height: 1.5; margin: 0; }
+  .dropzone {
+    width: 100%;
+    max-width: 560px;
+    min-height: 220px;
+    border: 1.5px dashed var(--border);
+    border-radius: 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    cursor: pointer;
+    transition: border-color 0.25s ease, background 0.25s ease, box-shadow 0.25s ease;
+    background: var(--surface);
+    position: relative;
+    overflow: hidden;
+  }
+  .dropzone::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 50% 50%, var(--accent-dim), transparent 70%);
+    opacity: 0;
+    transition: opacity 0.3s ease;
+  }
+  .dropzone.dragover {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent), 0 0 32px var(--accent-dim);
+  }
+  .dropzone.dragover::before { opacity: 1; animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse {
+    0%, 100% { transform: scale(1); opacity: 0.5; }
+    50% { transform: scale(1.15); opacity: 0.9; }
+  }
+  .dropzone-icon { width: 40px; height: 40px; color: var(--text-dim); transition: color 0.25s ease; z-index: 1; }
+  .dropzone.dragover .dropzone-icon { color: var(--accent); }
+  .dropzone-label { font-size: 15px; font-weight: 500; z-index: 1; }
+  .dropzone-sub { font-size: 13px; color: var(--text-dim); font-family: 'JetBrains Mono', monospace; z-index: 1; }
+  input[type="file"] { display: none; }
+  .niche-input { width: 100%; max-width: 560px; margin-top: 16px; }
+  .niche-input input {
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 16px;
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    outline: none;
+    transition: border-color 0.2s ease;
+  }
+  .niche-input input:focus { border-color: var(--accent); }
+  .niche-input input::placeholder { color: var(--text-dim); }
+  .mode-toggle { display: flex; gap: 8px; width: 100%; max-width: 560px; margin-top: 16px; }
+  .mode-btn {
+    flex: 1;
+    padding: 10px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--text-dim);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+  .mode-btn.active { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+  .queue { width: 100%; max-width: 560px; margin-top: 40px; }
+  .queue-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 12px;
+  }
+  .queue-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    margin-bottom: 8px;
+    font-size: 14px;
+  }
+  .queue-item-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .queue-item-status { font-family: 'JetBrains Mono', monospace; font-size: 12px; flex-shrink: 0; }
+  .status-uploading { color: var(--accent); }
+  .status-done { color: var(--success); }
+  .status-error { color: var(--error); }
+  .spinner {
+    width: 12px;
+    height: 12px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    flex-shrink: 0;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+  <div class="header">
+    <div class="eyebrow">Learning Analyzer</div>
+    <h1>Feed the system</h1>
+    <p>Drop videos here. They're stored separately from your channel's assets, analyzed for what works, then discarded - only the patterns stay.</p>
+  </div>
+  <div class="dropzone" id="dropzone">
+    <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+      <path d="M12 16V4M12 4L7 9M12 4l5 5" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M4 16v3a2 2 0 002 2h12a2 2 0 002-2v-3" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <div class="dropzone-label">Drop videos here, or tap to choose</div>
+    <div class="dropzone-sub" id="dropzone-sub">.mp4 / .mov / .webm - one or many at once</div>
+    <input type="file" id="fileInput" accept="video/*" multiple>
+  </div>
+  <div class="mode-toggle" id="modeToggle">
+    <button class="mode-btn active" data-mode="analyze">Analyze</button>
+    <button class="mode-btn" data-mode="teach">Teach</button>
+  </div>
+  <div class="niche-input">
+    <input type="text" id="nicheTag" placeholder="niche / topic tag (optional) - e.g. cooking, commentary, gaming">
+  </div>
+  <div class="queue" id="queue" style="display:none;">
+    <div class="queue-title">Intake queue</div>
+    <div id="queueList"></div>
+  </div>
+<script>
+  const WORKER_BASE = 'https://ai-ceo-orchestrator.jacklabs.workers.dev';
+  const dropzone = document.getElementById('dropzone');
+  const fileInput = document.getElementById('fileInput');
+  const nicheTag = document.getElementById('nicheTag');
+  const queue = document.getElementById('queue');
+  const queueList = document.getElementById('queueList');
+  let currentMode = 'analyze';
+  document.querySelectorAll('.mode-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      document.querySelectorAll('.mode-btn').forEach(function(b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      currentMode = btn.dataset.mode;
+    });
+  });
+  dropzone.addEventListener('click', () => fileInput.click());
+  dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('dragover'); });
+  dropzone.addEventListener('dragleave', () => { dropzone.classList.remove('dragover'); });
+  dropzone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropzone.classList.remove('dragover');
+    const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('video/'));
+    files.forEach(uploadFile);
+  });
+  fileInput.addEventListener('change', (e) => {
+    Array.from(e.target.files).forEach(uploadFile);
+    fileInput.value = '';
+  });
+  function addQueueItem(fileName) {
+    queue.style.display = 'block';
+    const id = 'item-' + Math.random().toString(36).slice(2);
+    const el = document.createElement('div');
+    el.className = 'queue-item';
+    el.id = id;
+    el.innerHTML = '<div class="spinner"></div><div class="queue-item-name">' + fileName + '</div><div class="queue-item-status status-uploading">uploading</div>';
+    queueList.prepend(el);
+    return id;
+  }
+  function updateQueueItem(id, status, label) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const spinner = el.querySelector('.spinner');
+    const statusEl = el.querySelector('.queue-item-status');
+    if (status === 'done') {
+      spinner.remove();
+      statusEl.className = 'queue-item-status status-done';
+      statusEl.textContent = label || 'analyzed';
+    } else if (status === 'error') {
+      spinner.remove();
+      statusEl.className = 'queue-item-status status-error';
+      statusEl.textContent = label || 'failed';
+    } else {
+      statusEl.textContent = label || status;
+    }
+  }
+  async function uploadFile(file) {
+    const itemId = addQueueItem(file.name);
+    if (!file.type || !file.type.startsWith('video/')) {
+      updateQueueItem(itemId, 'error', 'not a video file');
+      return;
+    }
+    try {
+      let urlRes;
+      try {
+        urlRes = await fetch(WORKER_BASE + '/analyzer/upload-url', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fileName: file.name })
+        });
+      } catch (e) { throw new Error('STEP1-getUploadUrl: ' + e.message); }
+      if (!urlRes.ok) throw new Error('STEP1-getUploadUrl: HTTP ' + urlRes.status);
+      const urlData = await urlRes.json();
+      const uploadUrl = urlData.uploadUrl;
+      const authToken = urlData.authToken;
+      const fileName = urlData.fileName;
+      const sha1 = await crypto.subtle.digest('SHA-1', await file.arrayBuffer());
+      const sha1Hex = Array.from(new Uint8Array(sha1)).map(b => b.toString(16).padStart(2, '0')).join('');
+      let uploadRes;
+      try {
+        uploadRes = await fetch(uploadUrl, {
+          method: 'POST',
+          headers: {
+            'Authorization': authToken,
+            'X-Bz-File-Name': encodeURIComponent(fileName),
+            'Content-Type': file.type || 'video/mp4',
+            'X-Bz-Content-Sha1': sha1Hex
+          },
+          body: file
+        });
+      } catch (e) { throw new Error('STEP2-uploadToB2: ' + e.message); }
+      if (!uploadRes.ok) throw new Error('STEP2-uploadToB2: HTTP ' + uploadRes.status);
+      const uploadResultData = await uploadRes.json();
+      const b2FileId = uploadResultData.fileId;
+      updateQueueItem(itemId, 'uploading', 'registering');
+      let registerRes;
+      try {
+        registerRes = await fetch(WORKER_BASE + '/analyzer/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fileName: fileName, nicheTag: nicheTag.value.trim() || null, mode: currentMode, b2FileId: b2FileId })
+        });
+      } catch (e) { throw new Error('STEP3-register: ' + e.message); }
+      if (!registerRes.ok) {
+        let errMsg = 'STEP3-register: HTTP ' + registerRes.status;
+        try {
+          const errBody = await registerRes.json();
+          if (errBody.message) errMsg = errBody.message;
+        } catch (parseErr) {}
+        throw new Error(errMsg);
+      }
+      const registerResultData = await registerRes.json();
+      const successLabel = registerResultData.correctionNote ? registerResultData.correctionNote : 'queued for analysis';
+      updateQueueItem(itemId, 'done', successLabel);
+    } catch (err) {
+      updateQueueItem(itemId, 'error', err.message);
+    }
+  }
+</script>
+</body>
+</html>
+`, { headers: { "Content-Type": "text/html" } });
     }
 
     if (url.pathname === "/sponsor-kit") {
@@ -3040,13 +3294,13 @@ if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
             generatedScript = scriptMatch ? scriptMatch[1].trim() : responseText.trim();
 
             sceneDescriptions = [
-              { emoji: e1 ? e1[1].trim().split(" ")[0] : "??", label: l1 ? cleanImageDescription(l1[1].trim()) : cleanTitle },
-              { emoji: e2 ? e2[1].trim().split(" ")[0] : "??", label: l2 ? cleanImageDescription(l2[1].trim()) : cleanTitle },
-              { emoji: e3 ? e3[1].trim().split(" ")[0] : "??", label: l3 ? cleanImageDescription(l3[1].trim()) : cleanTitle }
+              { emoji: e1 ? e1[1].trim().split(" ")[0] : "🎬", label: l1 ? cleanImageDescription(l1[1].trim()) : cleanTitle },
+              { emoji: e2 ? e2[1].trim().split(" ")[0] : "🎬", label: l2 ? cleanImageDescription(l2[1].trim()) : cleanTitle },
+              { emoji: e3 ? e3[1].trim().split(" ")[0] : "🎬", label: l3 ? cleanImageDescription(l3[1].trim()) : cleanTitle }
             ];
 
             thumbnailDescription = {
-              emoji: te ? te[1].trim().split(" ")[0] : "??",
+              emoji: te ? te[1].trim().split(" ")[0] : "🔥",
               label: tl ? cleanImageDescription(tl[1].trim()) : cleanTitle
             };
 
@@ -3104,8 +3358,8 @@ if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
         const generatedTitle = planRow.generated_title;
         const generatedScript = planRow.generated_script;
         const metadata = JSON.parse(planRow.metadata || "{}");
-        const sceneDescriptions = metadata.sceneDescriptions || [{ emoji: "??", label: generatedTitle }, { emoji: "??", label: generatedTitle }, { emoji: "??", label: generatedTitle }];
-        const thumbnailDescription = metadata.thumbnailDescription || { emoji: "??", label: generatedTitle };
+        const sceneDescriptions = metadata.sceneDescriptions || [{ emoji: "🎬", label: generatedTitle }, { emoji: "🎬", label: generatedTitle }, { emoji: "🎬", label: generatedTitle }];
+        const thumbnailDescription = metadata.thumbnailDescription || { emoji: "🔥", label: generatedTitle };
         const opp = { id: planRow.opp_id, created_at: planRow.opp_created_at, profit_score: 999 };
 
         try {
@@ -3127,29 +3381,16 @@ if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
           }
 
           let piperIsAvailable = false;
-          const PIPER_HEALTH_RETRY_ATTEMPTS = 4;
-          const PIPER_HEALTH_RETRY_DELAY_MS = 6000;
-          for (let attempt = 1; attempt <= PIPER_HEALTH_RETRY_ATTEMPTS; attempt++) {
-            try {
-              const piperHealthRes = await fetch("https://ai-ceo-video-assembler.onrender.com/generate-speech/health", { signal: AbortSignal.timeout(20000) });
-              if (piperHealthRes.ok) {
-                const piperHealth = await piperHealthRes.json();
-                if (piperHealth.ready) {
-                  piperIsAvailable = true;
-                  break;
-                }
-                console.log(`Piper health check attempt ${attempt}/${PIPER_HEALTH_RETRY_ATTEMPTS}: not ready yet (likely cold-starting).`);
-              }
-            } catch (piperHealthErr) {
-              console.log(`Non-fatal: piper health check attempt ${attempt}/${PIPER_HEALTH_RETRY_ATTEMPTS} failed:`, piperHealthErr.message);
+          try {
+            const piperHealthRes = await fetch("https://ai-ceo-video-assembler.onrender.com/generate-speech/health", { signal: AbortSignal.timeout(20000) });
+            if (piperHealthRes.ok) {
+              const piperHealth = await piperHealthRes.json();
+              piperIsAvailable = !!piperHealth.ready;
             }
-            if (attempt < PIPER_HEALTH_RETRY_ATTEMPTS) {
-              await new Promise(resolve => setTimeout(resolve, PIPER_HEALTH_RETRY_DELAY_MS));
-            }
+          } catch (piperHealthErr) {
+            console.log("Non-fatal: piper health check failed before budget gate:", piperHealthErr.message);
           }
-          if (!piperIsAvailable) {
-            console.log("Piper still not ready after retries, falling back to Aura-2 for this video.");
-          }
+
           if (!piperIsAvailable) {
             const canProceedNeuronBudget = await checkNeuronBudget(env, "tts");
             if (!canProceedNeuronBudget) {
@@ -3446,7 +3687,7 @@ if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
 // the playlist-adding try block that follows it).
 //
 // Also add these 5 imports at the top of index.js, near the other imports:
-//   import { openEntry, sweepExpiredEntries, revertAllOpenEntries } from "./self-mod-lifecycle.js";
+//   import { openEntry, sweepExpiredEntries } from "./self-mod-lifecycle.js";
 //   import { maybeProposePublishHourTrial, judgePublishHourTrial, rollbackPublishHourTrial } from "./publish-hour-self-mod.js";
 //   import { maybeProposeWorkersPlanUpgrade, recordBacklogSnapshot } from "./payment-proposal-trigger.js";
 //   import { proposeAndDeployCodeChange, judgeCodeChange, rollbackCodeChange } from "./code-self-mod.js";
@@ -3589,7 +3830,7 @@ if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
       }
 
       const publishedVideos = await env.ai_ceo_memory.prepare(
-        "SELECT v.id, v.content_plan_id, v.youtube_video_id, v.published_at, cp.title, cp.script FROM videos v JOIN content_plans cp ON v.content_plan_id = cp.id WHERE v.status = 'published' AND v.youtube_video_id IS NOT NULL"
+        "SELECT v.id, v.content_plan_id, v.youtube_video_id, cp.title, cp.script FROM videos v JOIN content_plans cp ON v.content_plan_id = cp.id WHERE v.status = 'published' AND v.youtube_video_id IS NOT NULL"
       ).all();
 
       for (const pubVideo of publishedVideos.results) {
@@ -3633,11 +3874,6 @@ if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
               ).bind(pubVideo.id, analytics.views, analytics.watchTimeMinutes, analytics.averageViewDuration, analytics.likes, analytics.comments).run();
 
               console.log(`Analytics recorded for video id=${pubVideo.id}: ${analytics.views} views, ${analytics.watchTimeMinutes} min watched`);
-
-              const hoursAge = (Date.now() - new Date(pubVideo.published_at + "Z").getTime()) / (1000 * 60 * 60);
-              if (hoursAge >= 24 * 7) {
-                continue;
-              }
 
               try {
                 const usedVariants = await env.ai_ceo_memory.prepare(
@@ -3866,8 +4102,6 @@ Respond with only the reflection, no preamble.`;
     }
   }
 };
-
-
 
 
 
