@@ -3635,7 +3635,7 @@ if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
               console.log(`Analytics recorded for video id=${pubVideo.id}: ${analytics.views} views, ${analytics.watchTimeMinutes} min watched`);
 
               const hoursAge = (Date.now() - new Date(pubVideo.published_at + "Z").getTime()) / (1000 * 60 * 60);
-              if (hoursAge >= 24 * 7) {
+              if (!pubVideo.published_at || hoursAge >= 24 * 7) {
                 continue;
               }
 
