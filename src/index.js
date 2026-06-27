@@ -2725,6 +2725,15 @@ if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
 
   async scheduled(event, env, ctx) {
     try {
+      let sharedAccessToken = null;
+      let sharedChannelId = null;
+      try {
+        sharedAccessToken = await getYoutubeAccessToken(env);
+        sharedChannelId = await getOwnChannelId(sharedAccessToken);
+      } catch (tokenErr) {
+        console.log("Non-fatal: could not fetch shared YouTube access token/channel ID for this tick. YouTube-dependent operations will be skipped this run.", tokenErr.message);
+      }
+
       const today = new Date().toISOString().slice(0, 10);
       const competitorCheckDone = await env.ai_ceo_memory.prepare(
         "SELECT count FROM daily_usage WHERE usage_date = ? AND op_type = ?"
@@ -2763,8 +2772,9 @@ if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
         if (!keywordsBackfillDone) {
           try {
             console.log("Running one-time channel keywords backfill...");
-            const backfillAccessToken = await getYoutubeAccessToken(env);
-            const backfillChannelId = await getOwnChannelId(backfillAccessToken);
+            if (!sharedAccessToken) { throw new Error("Shared YouTube access token unavailable this tick"); }
+            const backfillAccessToken = sharedAccessToken;
+            const backfillChannelId = sharedChannelId;
             const currentBranding = await getCurrentBranding(backfillAccessToken, backfillChannelId);
             const newKeywords = await generateKeywordsOnly(env);
 
@@ -2793,8 +2803,9 @@ if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
         try {
           console.log("Running one-time channel identity setup...");
           const identity = await generateChannelIdentity(env);
-          const accessToken = await getYoutubeAccessToken(env);
-          const channelId = await getOwnChannelId(accessToken);
+          if (!sharedAccessToken) { throw new Error("Shared YouTube access token unavailable this tick"); }
+          const accessToken = sharedAccessToken;
+          const channelId = sharedChannelId;
 
           let bannerUrl = null;
           try {
@@ -3397,7 +3408,11 @@ if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
 
           console.log(`Publishing video id=${video.id} (content_plan_id=${video.content_plan_id}) to YouTube...`);
 
-          const accessToken = await getYoutubeAccessToken(env);
+          if (!sharedAccessToken) {
+            console.log(`Skipping publish for video id=${video.id}: shared YouTube access token unavailable this tick.`);
+            continue;
+          }
+          const accessToken = sharedAccessToken;
 
           const publishAuthData = await b2Authorize(env);
           const publishDownloadBase = publishAuthData.apiInfo.storageApi.downloadUrl;
@@ -3602,8 +3617,11 @@ if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
         "SELECT v.id, v.content_plan_id, v.youtube_video_id, v.published_at, cp.title, cp.script FROM videos v JOIN content_plans cp ON v.content_plan_id = cp.id WHERE v.status = 'published' AND v.youtube_video_id IS NOT NULL"
       ).all();
 
-      const modAccessToken = await getYoutubeAccessToken(env);
-      const modOwnChannelId = await getOwnChannelId(modAccessToken);
+      if (!sharedAccessToken) {
+        console.log("Skipping moderation/analytics block this tick: shared YouTube access token unavailable.");
+      } else {
+      const modAccessToken = sharedAccessToken;
+      const modOwnChannelId = sharedChannelId;
 
       for (const pubVideo of publishedVideos.results) {
         try {
@@ -3725,14 +3743,15 @@ Respond with only the reflection, no preamble.`;
         "INSERT INTO scheduler_state (task_name, last_run_at) VALUES (?, ?) ON CONFLICT(task_name) DO UPDATE SET last_run_at = excluded.last_run_at"
       ).bind("video_moderation_block", new Date().toISOString()).run();
       }
+      }
 
       try {
         const statsCheckDone = await env.ai_ceo_memory.prepare(
           "SELECT count FROM daily_usage WHERE usage_date = ? AND op_type = ?"
         ).bind(today, "channel_stats_check").first();
 
-        if (!statsCheckDone) {
-          const statsAccessToken = await getYoutubeAccessToken(env);
+        if (!statsCheckDone && sharedAccessToken) {
+          const statsAccessToken = sharedAccessToken;
           const channelStats = await getChannelStats(statsAccessToken);
 
           await env.ai_ceo_memory.prepare(
