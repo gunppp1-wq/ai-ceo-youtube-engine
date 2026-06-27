@@ -3337,6 +3337,7 @@ if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
           console.log(`Thumbnail generated and uploaded: ${thumbnailFileName}`);
 
           const audioFileName = `audio/content_plan_${contentPlanId}.mp3`;
+          console.log(`Audio bytes before upload for content_plan_id=${contentPlanId}: ${audioBytes.length} bytes`);
           const audioUploadResult = await b2UploadFile(sharedUploadUrlData.uploadUrl, sharedUploadUrlData.authorizationToken, audioFileName, audioBytes, "audio/mpeg");
 
           console.log(`Video assets uploaded for content_plan_id=${contentPlanId}: ${audioFileName}, ${sceneFrameUrls.length} scenes x ${sceneFrameUrls[0]?.length || 0} frames`);
