@@ -3381,6 +3381,20 @@ if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
           const isFreshTrend = oppAgeHours <= 3;
           const targetHour = isFreshTrend ? null : await getNextRotationHour(env);
 
+const scriptWords = generatedScript.trim().split(/\s+/).filter(w => w.length > 0);
+          const uniqueWords = new Set(scriptWords.map(w => w.toLowerCase()));
+          const MIN_SCRIPT_WORDS = 20;
+          const MIN_UNIQUE_RATIO = 0.4;
+          const uniqueRatio = scriptWords.length > 0 ? uniqueWords.size / scriptWords.length : 0;
+
+          if (scriptWords.length < MIN_SCRIPT_WORDS || uniqueRatio < MIN_UNIQUE_RATIO) {
+            console.log(`LOUD LOG: Economics Filter rejected content_plan_id=${contentPlanId}: script too short or repetitive (${scriptWords.length} words, ${(uniqueRatio * 100).toFixed(0)}% unique). Marking as rejected_quality instead of video_ready.`);
+            await env.ai_ceo_memory.prepare(
+              "INSERT INTO videos (content_plan_id, status, thumbnail_url, video_file_name, b2_file_ids, target_publish_hour) VALUES (?, ?, ?, ?, ?, ?)"
+            ).bind(contentPlanId, "rejected_quality", thumbnailDownloadUrl, finalVideoFileName, b2FileIds, targetHour).run();
+            continue;
+          }
+
           await env.ai_ceo_memory.prepare(
             "INSERT INTO videos (content_plan_id, status, thumbnail_url, video_file_name, b2_file_ids, target_publish_hour) VALUES (?, ?, ?, ?, ?, ?)"
           ).bind(contentPlanId, "video_ready", thumbnailDownloadUrl, finalVideoFileName, b2FileIds, targetHour).run();
