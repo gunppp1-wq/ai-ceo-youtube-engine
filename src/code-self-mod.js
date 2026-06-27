@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // GENERAL CODE SELF-MODIFICATION
 // The program can propose, generate, and deploy changes to its own
 // source code (any file except protected-core.js and the self-mod
@@ -15,9 +15,12 @@
 // ============================================================
 
 import { openEntry } from "./self-mod-lifecycle.js";
+import { checkGateIntegrity } from "./gate-integrity-check.js";
+import * as acorn from "acorn";
+import * as walk from "acorn-walk";
 
 // Files that physically cannot be targeted by self-modification, ever.
-// Enforced here, not just "instructed" — every entry point in this file
+// Enforced here, not just "instructed" ??every entry point in this file
 // checks against this list before doing anything.
 const LOCKED_FILES = [
   "src/protected-core.js",
@@ -60,7 +63,8 @@ const ALL_MODULE_FILES = [
   "notifications.js",
   "publish-hour-self-mod.js",
   "payment-proposal-trigger.js",
-  "code-self-mod.js"
+  "code-self-mod.js",
+  "gate-integrity-check.js"
 ];
 
 /**
@@ -75,7 +79,7 @@ async function fetchAllLiveModules(env) {
   // full multipart body of all modules, not just the entry point. This
   // function fetches it once and splits it by module name. If the API
   // response shape differs from what's assumed here, this is the first
-  // place to check when debugging — it was not possible to verify this
+  // place to check when debugging ??it was not possible to verify this
   // against the real API in this environment, so treat as unverified
   // until tested against the live Worker.
   const res = await fetch(
@@ -88,7 +92,7 @@ async function fetchAllLiveModules(env) {
 
   const contentType = res.headers.get("content-type") || "";
   if (!contentType.includes("multipart")) {
-    // Single-file response — only index.js exists server-side as far as
+    // Single-file response ??only index.js exists server-side as far as
     // this endpoint is concerned. Treat other files as empty/missing
     // rather than guessing; the caller decides what to do with that.
     const text = await res.text();
@@ -109,12 +113,12 @@ async function fetchAllLiveModules(env) {
 
 /**
  * Pushes new script content live via Cloudflare's Workers API.
- * This is the ONLY deploy path available to self-modification — it
+ * This is the ONLY deploy path available to self-modification ??it
  * cannot run wrangler, cannot use git, cannot do anything a human
  * operator does. It is a direct API overwrite of the script body.
  *
  * CRITICAL: must include EVERY module file, not just the one that
- * changed — Cloudflare's PUT replaces the whole script. Uploading only
+ * changed ??Cloudflare's PUT replaces the whole script. Uploading only
  * the changed file would silently delete every other module.
  * allModules is { fileName: content } covering every file in
  * ALL_MODULE_FILES, with exactly one entry replaced by newContent for
@@ -156,7 +160,7 @@ async function deployScriptContent(env, allModules) {
 /**
  * Asks the AI binding to generate a complete replacement for the target
  * file's content, given a description of the intended change. Returns
- * the raw text the model produced — NOT yet syntax-checked or deployed.
+ * the raw text the model produced ??NOT yet syntax-checked or deployed.
  */
 async function generateCodeChange(env, currentContent, changeDescription) {
   const prompt = `You are modifying a Cloudflare Worker's source file (JavaScript, ES modules).
@@ -184,7 +188,7 @@ Respond with ONLY the complete new file content, nothing else - no explanation, 
  * Full propose-and-deploy flow for a code self-modification.
  * Returns the new entry ID on success, or null if the attempt was
  * rejected at any safety checkpoint (locked file, syntax failure, etc).
- * A rejection here is NOT a revert — it means nothing was ever deployed,
+ * A rejection here is NOT a revert ??it means nothing was ever deployed,
  * so there is nothing to undo. Rejections are loud-logged, never silent.
  */
 export async function proposeAndDeployCodeChange(env, { targetFile, whatChanged, why, expectedBenefit, metricName, metricQuery, deadlineDays }) {
@@ -211,7 +215,7 @@ export async function proposeAndDeployCodeChange(env, { targetFile, whatChanged,
     return null;
   }
 
-  const newContent = await generateCodeChange(env, currentContent, whatChanged + " — " + why);
+  const newContent = await generateCodeChange(env, currentContent, whatChanged + " ??" + why);
 
   const check = syntaxCheck(newContent);
   if (!check.valid) {
@@ -225,6 +229,10 @@ export async function proposeAndDeployCodeChange(env, { targetFile, whatChanged,
       console.error("LOUD LOG: generated code appears to remove a reference to a locked safety module. Deploy aborted.", { lockedModuleName });
       return null;
     }
+  }
+
+  if (!checkGateIntegrity(currentContent, newContent, targetFile)) {
+    return null;
   }
 
   // Paid-resource dependency check: if the generated code introduces or
@@ -266,7 +274,7 @@ export async function proposeAndDeployCodeChange(env, { targetFile, whatChanged,
   });
 
   // Save a backup of EVERY module's current content, not just the
-  // targeted file — revert needs to restore the complete known-good
+  // targeted file ??revert needs to restore the complete known-good
   // bundle, and storing only the changed file would leave revert unable
   // to reconstruct the full deploy on its own.
   const now = Math.floor(Date.now() / 1000);
@@ -312,7 +320,7 @@ export async function judgeCodeChange(env, entry) {
     .first();
 
   if (!meta || !meta.deploy_succeeded) {
-    return "reverted"; // never actually went live, or we lost track of it — don't keep it open
+    return "reverted"; // never actually went live, or we lost track of it ??don't keep it open
   }
   if (!meta.metric_query) {
     return "reverted"; // no way to judge success without a defined metric
@@ -356,7 +364,7 @@ export async function rollbackCodeChange(env, entry) {
   }
 
   // Verify every required module is present in the backup set before
-  // attempting to deploy anything — a partial backup is not safe to use.
+  // attempting to deploy anything ??a partial backup is not safe to use.
   const missing = ALL_MODULE_FILES.filter(f => restoredModules[f] === undefined);
   if (missing.length > 0) {
     console.error("LOUD LOG: backup set is missing required modules, cannot safely revert. Manual intervention required.", { entryId: entry.id, missing });
