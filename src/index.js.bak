@@ -1,4 +1,4 @@
-﻿import puppeteer from "@cloudflare/puppeteer";
+import puppeteer from "@cloudflare/puppeteer";
 import { passesPlatformSafetyGate, passesEconomicsGate, containsForbiddenPaymentField, MIN_PROFIT_SCORE, MIN_SCRIPT_LENGTH } from "./protected-core.js";
 import { openEntry, sweepExpiredEntries, revertAllOpenEntries } from "./self-mod-lifecycle.js";
 import { maybeProposePublishHourTrial, judgePublishHourTrial, rollbackPublishHourTrial } from "./publish-hour-self-mod.js";
@@ -3588,25 +3588,13 @@ if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
         }
       }
 
-      const modSchedState = await env.ai_ceo_memory.prepare(
-        "SELECT last_run_at FROM scheduler_state WHERE task_name = ?"
-      ).bind("video_moderation_block").first();
-      const modHoursSinceLastRun = modSchedState && modSchedState.last_run_at
-        ? (Date.now() - new Date(modSchedState.last_run_at).getTime()) / (1000 * 60 * 60)
-        : Infinity;
-
-      if (modHoursSinceLastRun < 23) {
-        console.log(`Skipping moderation/analytics block - ran ${modHoursSinceLastRun.toFixed(1)} hours ago, runs once daily.`);
-      } else {
       const publishedVideos = await env.ai_ceo_memory.prepare(
         "SELECT v.id, v.content_plan_id, v.youtube_video_id, v.published_at, cp.title, cp.script FROM videos v JOIN content_plans cp ON v.content_plan_id = cp.id WHERE v.status = 'published' AND v.youtube_video_id IS NOT NULL"
       ).all();
 
-      const modAccessToken = await getYoutubeAccessToken(env);
-      const modOwnChannelId = await getOwnChannelId(modAccessToken);
-
       for (const pubVideo of publishedVideos.results) {
         try {
+          const modAccessToken = await getYoutubeAccessToken(env);
           const videoStatus = await getVideoStatus(modAccessToken, pubVideo.youtube_video_id);
 
           if (!videoStatus.exists || videoStatus.privacyStatus === "private" || videoStatus.rejectionReason) {
@@ -3637,7 +3625,8 @@ if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
             console.log(`Video id=${pubVideo.id} removed and data preserved in removed_videos`);
           } else {
             try {
-              const analytics = await fetchVideoAnalytics(modAccessToken, modOwnChannelId, pubVideo.youtube_video_id);
+              const analyticsChannelId = await getOwnChannelId(modAccessToken);
+              const analytics = await fetchVideoAnalytics(modAccessToken, analyticsChannelId, pubVideo.youtube_video_id);
 
               await env.ai_ceo_memory.prepare(
                 "INSERT INTO video_performance (video_id, views, watch_time_minutes, average_view_duration, likes, comments) VALUES (?, ?, ?, ?, ?, ?)"
@@ -3719,11 +3708,6 @@ Respond with only the reflection, no preamble.`;
         } catch (modErr) {
           console.log(`Non-fatal: moderation check failed for video id=${pubVideo.id}:`, modErr.message);
         }
-      }
-
-      await env.ai_ceo_memory.prepare(
-        "INSERT INTO scheduler_state (task_name, last_run_at) VALUES (?, ?) ON CONFLICT(task_name) DO UPDATE SET last_run_at = excluded.last_run_at"
-      ).bind("video_moderation_block", new Date().toISOString()).run();
       }
 
       try {
