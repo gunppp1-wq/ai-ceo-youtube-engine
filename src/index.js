@@ -3662,7 +3662,7 @@ if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
               const analytics = await fetchVideoAnalytics(modAccessToken, modOwnChannelId, pubVideo.youtube_video_id);
 
               await env.ai_ceo_memory.prepare(
-                "INSERT INTO video_performance (video_id, views, watch_time_minutes, average_view_duration, likes, comments) VALUES (?, ?, ?, ?, ?, ?)"
+                "INSERT INTO video_performance (video_id, views, watch_time_minutes, average_view_duration, likes, comments) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(video_id) DO UPDATE SET views = excluded.views, watch_time_minutes = excluded.watch_time_minutes, average_view_duration = excluded.average_view_duration, likes = excluded.likes, comments = excluded.comments, collected_at = datetime('now')"
               ).bind(pubVideo.id, analytics.views, analytics.watchTimeMinutes, analytics.averageViewDuration, analytics.likes, analytics.comments).run();
 
               console.log(`Analytics recorded for video id=${pubVideo.id}: ${analytics.views} views, ${analytics.watchTimeMinutes} min watched`);
