@@ -405,7 +405,22 @@ async function reasonAboutStrategy(env, trajectory, benchmark) {
     console.log("Non-fatal: could not fetch taught instructions for strategy reasoning:", taughtErr.message);
   }
 
-  const strategyPrompt = `You are the strategic self-assessment layer for an automated YouTube commentary channel. Review your own growth trajectory and decide if any strategic change is warranted.${benchmarkSection}${taughtStrategySection}
+let videoPerformanceSection = "";
+  try {
+    const perf = await env.ai_ceo_memory.prepare(
+      "SELECT vp.views, vp.average_view_duration, vp.likes, vp.comments, vp.post_mortem, cp.title FROM video_performance vp JOIN videos v ON v.id = vp.video_id JOIN content_plans cp ON cp.id = v.content_plan_id ORDER BY vp.collected_at DESC LIMIT 10"
+    ).all();
+    if (perf.results && perf.results.length > 0) {
+      const perfDigest = perf.results.map(r =>
+        `"${r.title}": ${r.views} views, ${r.average_view_duration.toFixed(1)}s avg watch, ${r.likes} likes, ${r.comments} comments.${r.post_mortem ? " Post-mortem: " + r.post_mortem : ""}`
+      ).join("\n");
+      videoPerformanceSection = `\n\nPer-video performance data (most recent ${perf.results.length} videos):\n${perfDigest}`;
+    }
+  } catch (perfErr) {
+    console.log("Non-fatal: could not fetch video performance for strategy reasoning:", perfErr.message);
+  }
+
+  const strategyPrompt = `You are the strategic self-assessment layer for an automated YouTube commentary channel. Review your own growth trajectory and decide if any strategic change is warranted.${benchmarkSection}${taughtStrategySection}${videoPerformanceSection}
 
 Current trajectory:
 - Subscribers: ${trajectory.currentSubscribers} (need 1000 for monetization)
