@@ -3202,6 +3202,7 @@ if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
 
           const sceneFrameUrls = [];
           const sceneVideoUrls = [];
+          let sharedUploadUrlData = await b2GetUploadUrl(apiUrl, authToken, env.B2_BUCKET_ID);
           try {
             for (let sceneIdx = 0; sceneIdx < sceneDescriptions.length; sceneIdx++) {
               const motionType = MOTION_TYPES[(contentPlanId + sceneIdx) % MOTION_TYPES.length];
@@ -3268,9 +3269,14 @@ if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
 
               const frameUrls = [];
               for (let frameIdx = 0; frameIdx < frames.length; frameIdx++) {
-                const uploadUrlData = await b2GetUploadUrl(apiUrl, authToken, env.B2_BUCKET_ID);
                 const frameFileName = `frames/content_plan_${contentPlanId}_scene${sceneIdx}_frame${frameIdx}.jpg`;
-                await b2UploadFile(uploadUrlData.uploadUrl, uploadUrlData.authorizationToken, frameFileName, new Uint8Array(frames[frameIdx]), "image/jpeg");
+                try {
+                  await b2UploadFile(sharedUploadUrlData.uploadUrl, sharedUploadUrlData.authorizationToken, frameFileName, new Uint8Array(frames[frameIdx]), "image/jpeg");
+                } catch (uploadErr) {
+                  console.log(`Non-fatal: B2 upload failed with shared URL, fetching a fresh one and retrying for scene ${sceneIdx} frame ${frameIdx}:`, uploadErr.message);
+                  sharedUploadUrlData = await b2GetUploadUrl(apiUrl, authToken, env.B2_BUCKET_ID);
+                  await b2UploadFile(sharedUploadUrlData.uploadUrl, sharedUploadUrlData.authorizationToken, frameFileName, new Uint8Array(frames[frameIdx]), "image/jpeg");
+                }
                 frameUrls.push(`${downloadUrlBase}/file/ai-ceo-media/${frameFileName}?Authorization=${authToken}`);
               }
               sceneFrameUrls.push(frameUrls);
@@ -3325,15 +3331,13 @@ if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
             thumbBytes = Uint8Array.from(thumbBinaryString, (m) => m.codePointAt(0));
           }
 
-          const thumbUploadUrlData = await b2GetUploadUrl(apiUrl, authToken, env.B2_BUCKET_ID);
           const thumbnailFileName = `thumbnails/content_plan_${contentPlanId}_thumb.jpg`;
-          const thumbUploadResult = await b2UploadFile(thumbUploadUrlData.uploadUrl, thumbUploadUrlData.authorizationToken, thumbnailFileName, thumbBytes, "image/jpeg");
+          const thumbUploadResult = await b2UploadFile(sharedUploadUrlData.uploadUrl, sharedUploadUrlData.authorizationToken, thumbnailFileName, thumbBytes, "image/jpeg");
           const thumbnailDownloadUrl = `${downloadUrlBase}/file/ai-ceo-media/${thumbnailFileName}?Authorization=${authToken}`;
           console.log(`Thumbnail generated and uploaded: ${thumbnailFileName}`);
 
-          const uploadUrlData = await b2GetUploadUrl(apiUrl, authToken, env.B2_BUCKET_ID);
           const audioFileName = `audio/content_plan_${contentPlanId}.mp3`;
-          const audioUploadResult = await b2UploadFile(uploadUrlData.uploadUrl, uploadUrlData.authorizationToken, audioFileName, audioBytes, "audio/mpeg");
+          const audioUploadResult = await b2UploadFile(sharedUploadUrlData.uploadUrl, sharedUploadUrlData.authorizationToken, audioFileName, audioBytes, "audio/mpeg");
 
           console.log(`Video assets uploaded for content_plan_id=${contentPlanId}: ${audioFileName}, ${sceneFrameUrls.length} scenes x ${sceneFrameUrls[0]?.length || 0} frames`);
 
