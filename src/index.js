@@ -3195,13 +3195,20 @@ if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
             const selectedVoice = AURA2_VOICES[contentPlanId % AURA2_VOICES.length];
             console.log(`Piper unavailable, falling back to Aura-2 voice: ${selectedVoice} for content_plan_id=${contentPlanId}`);
 
-            const ttsResp = await env.AI.run("@cf/deepgram/aura-2-en", {
+const ttsResp = await env.AI.run("@cf/deepgram/aura-2-en", {
               text: generatedScript,
               speaker: selectedVoice
             }, { returnRawResponse: true });
 
+            console.log(`Aura-2 response status=${ttsResp.status}, content-type=${ttsResp.headers.get("content-type")}`);
+
             const audioArrayBuffer = await ttsResp.arrayBuffer();
             audioBytes = new Uint8Array(audioArrayBuffer);
+
+            if (audioBytes.length < 5000) {
+              const textDecoder = new TextDecoder();
+              console.log(`WARNING: Aura-2 audio suspiciously small (${audioBytes.length} bytes). Raw content preview: ${textDecoder.decode(audioBytes.slice(0, 200))}`);
+            }
           }
 
           const authData = await b2Authorize(env);
