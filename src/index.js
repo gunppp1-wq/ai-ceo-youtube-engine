@@ -2342,20 +2342,7 @@ export default {
       return new Response(COMBINED_DASHBOARD_HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
     }
 
-    // ============================================================
-// TEMPORARY TEST ROUTE (v2) ? multi-concurrent-revert verification
-// Corrected version: inserts two test entries DIRECTLY via SQL,
-// bypassing openEntry()'s daily speed limit. That limit governs how
-// often NEW self-modifications may be proposed - it is not part of
-// what this test verifies. The actual unit under test is
-// revertAllOpenEntries(): does it revert EVERY open entry, not just
-// the one that triggered the failure. Isolating the test from the
-// unrelated rate-limit gate is the correct fix, not a workaround.
-//
-// DELETE THIS ROUTE after running the test once.
-// ============================================================
-
-if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
+    if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
       const { results } = await env.ai_ceo_memory
         .prepare("SELECT * FROM self_mod_entries WHERE status = 'open' ORDER BY opened_at DESC")
         .all();
@@ -3531,20 +3518,6 @@ const scriptWords = generatedScript.trim().split(/\s+/).filter(w => w.length > 0
           if (video.target_publish_hour !== null && video.target_publish_hour !== undefined) {
             await markHourUsed(env, video.target_publish_hour);
             console.log(`Marked hour ${video.target_publish_hour} as used in rotation`);
-// ============================================================
-// PASTE THIS ENTIRE BLOCK once, inside the existing scheduled()
-// function's try { ... } block, right after the line:
-//   console.log("Marked hour " + video.target_publish_hour + " as used in rotation");
-// (i.e. right after the existing publish-hour rotation logic, before
-// the playlist-adding try block that follows it).
-//
-// Also add these 5 imports at the top of index.js, near the other imports:
-//   import { openEntry, sweepExpiredEntries, revertAllOpenEntries } from "./self-mod-lifecycle.js";
-//   import { maybeProposePublishHourTrial, judgePublishHourTrial, rollbackPublishHourTrial } from "./publish-hour-self-mod.js";
-//   import { maybeProposeWorkersPlanUpgrade, recordBacklogSnapshot } from "./payment-proposal-trigger.js";
-//   import { proposeAndDeployCodeChange, judgeCodeChange, rollbackCodeChange } from "./code-self-mod.js";
-//   import { maybeAttemptCodeSelfModification } from "./code-self-mod-trigger.js";
-// ============================================================
 
       // ---- Self-modification: publish-hour trial (propose) ----
       try {
@@ -3576,13 +3549,6 @@ const scriptWords = generatedScript.trim().split(/\s+/).filter(w => w.length > 0
       } catch (paymentProposalErr) {
         console.log("Non-fatal: payment proposal check failed:", paymentProposalErr.message);
       }
-// ============================================================
-// PASTE THIS BLOCK into scheduled(), alongside the other self-mod
-// trigger checks (e.g. right after the payment proposal block).
-//
-// Also add this import at the top of index.js:
-//   import { maybeProposeSpeedLimitIncrease, applyApprovedSpeedLimitIncrease, getProposalPrecedents } from "./speed-limit-proposal.js";
-// ============================================================
 
       // ---- Self-modification: speed limit raise proposal ----
       try {
