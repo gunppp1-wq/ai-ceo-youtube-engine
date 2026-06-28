@@ -3122,7 +3122,7 @@ if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
       }
 
       const unusedPlansForAssets = await env.ai_ceo_memory.prepare(
-        "SELECT cp.id as content_plan_id, cp.title as generated_title, cp.script as generated_script, cp.metadata, o.id as opp_id, o.created_at as opp_created_at FROM content_plans cp JOIN opportunities o ON o.id = cp.opportunity_id WHERE NOT EXISTS (SELECT 1 FROM videos v WHERE v.content_plan_id = cp.id) ORDER BY cp.id ASC LIMIT 1"
+        "SELECT cp.id as content_plan_id, cp.title as generated_title, cp.script as generated_script, cp.metadata, o.id as opp_id, o.created_at as opp_created_at FROM content_plans cp JOIN opportunities o ON o.id = cp.opportunity_id WHERE NOT EXISTS (SELECT 1 FROM videos v WHERE v.content_plan_id = cp.id) AND cp.failed_attempts < 3 ORDER BY cp.id ASC LIMIT 1"
       ).all();
 
       for (const planRow of unusedPlansForAssets.results) {
@@ -3410,6 +3410,13 @@ const scriptWords = generatedScript.trim().split(/\s+/).filter(w => w.length > 0
           console.log(`Video fully assembled for content_plan_id=${contentPlanId}: ${finalVideoFileName} (fileId: ${assembleResult.fileId})`);
         } catch (videoErr) {
           console.log(`ERROR generating/uploading video assets for content_plan_id=${contentPlanId}:`, videoErr.message);
+          try {
+            await env.ai_ceo_memory.prepare(
+              "UPDATE content_plans SET failed_attempts = failed_attempts + 1 WHERE id = ?"
+            ).bind(contentPlanId).run();
+          } catch (counterErr) {
+            console.log("Non-fatal: could not increment failed_attempts:", counterErr.message);
+          }
           try {
             await env.ai_ceo_memory.prepare(
               "INSERT INTO system_alerts (alert_type, message) VALUES (?, ?)"
