@@ -1414,6 +1414,26 @@ const ESTIMATED_NEURON_COST = {
   image_generation: 700
 };
 
+async function isAiQuotaExhaustedToday(env) {
+  const today = new Date().toISOString().slice(0, 10);
+  const row = await env.ai_ceo_memory.prepare(
+    "SELECT count FROM daily_usage WHERE usage_date = ? AND op_type = ?"
+  ).bind(today, "ai_quota_exhausted").first();
+  return !!row;
+}
+
+async function markAiQuotaExhaustedToday(env) {
+  const today = new Date().toISOString().slice(0, 10);
+  try {
+    await env.ai_ceo_memory.prepare(
+      "INSERT OR IGNORE INTO daily_usage (usage_date, op_type, count) VALUES (?, ?, 1)"
+    ).bind(today, "ai_quota_exhausted").run();
+    console.log("LOUD LOG: Cloudflare AI daily neuron quota confirmed exhausted (429). Skipping further AI calls for the rest of today.");
+  } catch (markErr) {
+    console.log("Non-fatal: could not mark AI quota as exhausted:", markErr.message);
+  }
+}
+
 async function checkNeuronBudgetCustomCost(env, estimatedCost) {
   const POSTING_RESERVE = ESTIMATED_NEURON_COST.tts || 8200;
   const effectiveBudgetForAnalyzer = DAILY_NEURON_BUDGET - POSTING_RESERVE;
@@ -3191,23 +3211,33 @@ if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
           if (audioBytes) {
             console.log(`Using Piper TTS for content_plan_id=${contentPlanId}`);
           } else {
+            if (await isAiQuotaExhaustedToday(env)) {
+              throw new Error("Skipping Aura-2: AI quota already confirmed exhausted today, avoiding wasted request.");
+            }
             const AURA2_VOICES = ["luna", "asteria", "athena", "hera", "aurora", "iris", "thalia", "orion", "apollo", "atlas"];
             const selectedVoice = AURA2_VOICES[contentPlanId % AURA2_VOICES.length];
             console.log(`Piper unavailable, falling back to Aura-2 voice: ${selectedVoice} for content_plan_id=${contentPlanId}`);
 
-const ttsResp = await env.AI.run("@cf/deepgram/aura-2-en", {
+            const ttsResp = await env.AI.run("@cf/deepgram/aura-2-en", {
               text: generatedScript,
               speaker: selectedVoice
             }, { returnRawResponse: true });
 
             console.log(`Aura-2 response status=${ttsResp.status}, content-type=${ttsResp.headers.get("content-type")}`);
 
+            if (!ttsResp.ok) {
+              const errorText = await ttsResp.text();
+              if (ttsResp.status === 429) {
+                await markAiQuotaExhaustedToday(env);
+              }
+              throw new Error(`Aura-2 TTS failed with status ${ttsResp.status}: ${errorText.slice(0, 300)}`);
+            }
+
             const audioArrayBuffer = await ttsResp.arrayBuffer();
             audioBytes = new Uint8Array(audioArrayBuffer);
 
             if (audioBytes.length < 5000) {
-              const textDecoder = new TextDecoder();
-              console.log(`WARNING: Aura-2 audio suspiciously small (${audioBytes.length} bytes). Raw content preview: ${textDecoder.decode(audioBytes.slice(0, 200))}`);
+              throw new Error(`Aura-2 returned suspiciously small audio (${audioBytes.length} bytes) despite OK status - treating as invalid.`);
             }
           }
 
