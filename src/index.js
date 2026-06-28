@@ -3173,8 +3173,8 @@ if (url.pathname === "/self-mod/api/entries" && request.method === "GET") {
           }
 
           let piperIsAvailable = false;
-          const PIPER_HEALTH_RETRY_ATTEMPTS = 4;
-          const PIPER_HEALTH_RETRY_DELAY_MS = 6000;
+          const PIPER_HEALTH_RETRY_ATTEMPTS = 6;
+          const PIPER_HEALTH_RETRY_DELAY_MS = 12000;
           for (let attempt = 1; attempt <= PIPER_HEALTH_RETRY_ATTEMPTS; attempt++) {
             try {
               const piperHealthRes = await fetch("https://ai-ceo-video-assembler.onrender.com/generate-speech/health", { signal: AbortSignal.timeout(20000) });
