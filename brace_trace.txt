@@ -1,0 +1,219 @@
+﻿3463 [5]:           if (!plan) {
+3464 [6]:             console.log(`No content_plan found for video id=${video.id}, content_plan_id=${video.content_plan_id}`);
+3465 [6]:             continue;
+3466 [6]:           }
+3467 [5]: 
+3468 [5]:           if (!video.video_file_name) {
+3469 [6]:             console.log(`Skipping video id=${video.id}: video_file_name is missing (likely an old/incomplete record)`);
+3470 [6]:             continue;
+3471 [6]:           }
+3472 [5]: 
+3473 [5]:           console.log(`Publishing video id=${video.id} (content_plan_id=${video.content_plan_id}) to YouTube...`);
+3474 [5]: 
+3475 [5]:           if (!sharedAccessToken) {
+3476 [6]:             console.log(`Skipping publish for video id=${video.id}: shared YouTube access token unavailable this tick.`);
+3477 [6]:             continue;
+3478 [6]:           }
+3479 [5]:           const accessToken = sharedAccessToken;
+3480 [5]: 
+3481 [5]:           const publishAuthData = await b2Authorize(env);
+3482 [5]:           const publishDownloadBase = publishAuthData.apiInfo.storageApi.downloadUrl;
+3483 [5]:           const publishAuthToken = publishAuthData.authorizationToken;
+3484 [5]: 
+3485 [5]:           const videoDownloadUrl = `${publishDownloadBase}/file/ai-ceo-media/${video.video_file_name}?Authorization=${publishAuthToken}`;
+3486 [5]:           const videoFileRes = await fetch(videoDownloadUrl);
+3487 [5]:           if (!videoFileRes.ok) throw new Error(`Failed to download video file from B2: ${videoFileRes.status}`);
+3488 [5]:           const videoBytes = new Uint8Array(await videoFileRes.arrayBuffer());
+3489 [5]: 
+3490 [5]:           const shortsDescription = `${plan.script}\n\nNew videos posted regularly - subscribe so you don't miss the next one.\n\n#Shorts`;
+3491 [5]:           const videoCategoryId = detectVideoCategory(plan.title);
+3492 [5]:           const videoTags = generateTags(plan.title);
+3493 [5]:           const uploadResult = await uploadVideoToYoutube(accessToken, videoBytes, plan.title, shortsDescription, videoCategoryId, videoTags);
+3494 [5]:           const youtubeVideoId = uploadResult.id;
+3495 [5]: 
+3496 [5]:           console.log(`Video uploaded to YouTube: videoId=${youtubeVideoId}`);
+3497 [5]: 
+3498 [5]:           if (video.thumbnail_url) {
+3499 [6]:             try {
+3500 [7]:               const thumbFileRes = await fetch(video.thumbnail_url);
+3501 [7]:               if (thumbFileRes.ok) {
+3502 [8]:                 const thumbnailBytes = new Uint8Array(await thumbFileRes.arrayBuffer());
+3503 [8]:                 await setYoutubeThumbnail(accessToken, youtubeVideoId, thumbnailBytes);
+3504 [8]:                 console.log(`Thumbnail set for videoId=${youtubeVideoId}`);
+3505 [8]:               }
+3506 [7]:             } catch (thumbErr) {
+3507 [7]:               console.log(`Non-fatal: failed to set thumbnail for videoId=${youtubeVideoId}:`, thumbErr.message);
+3508 [7]:             }
+3509 [6]:           }
+3510 [5]: 
+3511 [5]:           await env.ai_ceo_memory.prepare(
+3512 [5]:             "UPDATE videos SET status = ?, youtube_video_id = ?, published_at = datetime('now') WHERE id = ?"
+3513 [5]:           ).bind("published", youtubeVideoId, video.id).run();
+3514 [5]: 
+3515 [5]:           console.log(`Video id=${video.id} marked as published with youtube_video_id=${youtubeVideoId}`);
+3516 [5]: 
+3517 [5]:           if (video.target_publish_hour !== null && video.target_publish_hour !== undefined) {
+3518 [6]:             await markHourUsed(env, video.target_publish_hour);
+3519 [6]:             console.log(`Marked hour ${video.target_publish_hour} as used in rotation`);
+3520 [6]: 
+3521 [6]:       // ---- Self-modification: publish-hour trial (propose) ----
+3522 [6]:       try {
+3523 [7]:         const newTrialId = await maybeProposePublishHourTrial(env);
+3524 [7]:         if (newTrialId) {
+3525 [8]:           const openedEntry = await env.ai_ceo_memory
+3526 [8]:             .prepare("SELECT rollback_data FROM self_mod_entries WHERE id = ?")
+3527 [8]:             .bind(newTrialId)
+3528 [8]:             .first();
+3529 [8]:           if (openedEntry && openedEntry.rollback_data) {
+3530 [9]:             const rollback = JSON.parse(openedEntry.rollback_data);
+3531 [9]:             if (rollback.candidateHour !== undefined) {
+3532 [10]:               await markHourUsed(env, rollback.candidateHour);
+3533 [10]:               console.log("Self-mod: opened publish-hour trial #" + newTrialId + ", steering away from hour " + rollback.candidateHour);
+3534 [10]:             }
+3535 [9]:           }
+3536 [8]:         }
+3537 [7]:       } catch (selfModProposeErr) {
+3538 [7]:         console.log("Non-fatal: publish-hour self-mod proposal check failed:", selfModProposeErr.message);
+3539 [7]:       }
+3540 [6]: 
+3541 [6]:       // ---- Self-modification: payment proposal (Workers plan upgrade) ----
+3542 [6]:       try {
+3543 [7]:         await recordBacklogSnapshot(env);
+3544 [7]:         const proposalId = await maybeProposeWorkersPlanUpgrade(env);
+3545 [7]:         if (proposalId) {
+3546 [8]:           console.log("Payment proposal opened: Workers plan upgrade id=" + proposalId);
+3547 [8]:         }
+3548 [7]:       } catch (paymentProposalErr) {
+3549 [7]:         console.log("Non-fatal: payment proposal check failed:", paymentProposalErr.message);
+3550 [7]:       }
+3551 [6]: 
+3552 [6]:       // ---- Self-modification: speed limit raise proposal ----
+3553 [6]:       try {
+3554 [7]:         const speedProposalId = await maybeProposeSpeedLimitIncrease(env);
+3555 [7]:         if (speedProposalId) {
+3556 [8]:           console.log("Speed limit increase proposed, id=" + speedProposalId);
+3557 [8]:         }
+3558 [7]:       } catch (speedLimitErr) {
+3559 [7]:         console.log("Non-fatal: speed limit proposal check failed:", speedLimitErr.message);
+3560 [7]:       }
+3561 [6]: 
+3562 [6]: 
+3563 [6]:       // ---- Self-modification: general code self-modification (broad mandate) ----
+3564 [6]:       try {
+3565 [7]:         const codeModEntryId = await maybeAttemptCodeSelfModification(env);
+3566 [7]:         if (codeModEntryId) {
+3567 [8]:           console.log("Code self-modification attempted, entry id=" + codeModEntryId);
+3568 [8]:         }
+3569 [7]:       } catch (codeModErr) {
+3570 [7]:         console.log("Non-fatal: code self-modification attempt failed:", codeModErr.message);
+3571 [7]:       }
+3572 [6]: 
+3573 [6]:       // ---- Self-modification: sweep expired entries (judge/revert/extend/succeed) ----
+3574 [6]:       try {
+3575 [7]:         await sweepExpiredEntries(
+3576 [7]:           env,
+3577 [7]:           async (entry) => {
+3578 [8]:             if (entry.metric_name === "publish_hour_score") {
+3579 [9]:               return await judgePublishHourTrial(env, entry);
+3580 [9]:             }
+3581 [8]:             const codeMeta = await env.ai_ceo_memory
+3582 [8]:               .prepare("SELECT 1 FROM code_self_mod_metadata WHERE self_mod_entry_id = ?")
+3583 [8]:               .bind(entry.id)
+3584 [8]:               .first();
+3585 [8]:             if (codeMeta) {
+3586 [9]:               return await judgeCodeChange(env, entry);
+3587 [9]:             }
+3588 [8]:             return "reverted";
+3589 [8]:           },
+3590 [7]:           async (entry) => {
+3591 [8]:             if (entry.metric_name === "publish_hour_score") {
+3592 [9]:               await rollbackPublishHourTrial(env, entry);
+3593 [9]:               return;
+3594 [9]:             }
+3595 [8]:             const codeMeta = await env.ai_ceo_memory
+3596 [8]:               .prepare("SELECT 1 FROM code_self_mod_metadata WHERE self_mod_entry_id = ?")
+3597 [8]:               .bind(entry.id)
+3598 [8]:               .first();
+3599 [8]:             if (codeMeta) {
+3600 [9]:               await rollbackCodeChange(env, entry);
+3601 [9]:             }
+3602 [8]:           }
+3603 [7]:         );
+3604 [7]:       } catch (selfModSweepErr) {
+3605 [7]:         console.log("Non-fatal: self-mod entry sweep failed:", selfModSweepErr.message);
+3606 [7]:       }
+3607 [6]: 
+3608 [6]:           }
+3609 [5]: 
+3610 [5]:           try {
+3611 [6]:             const playlistRow = await env.ai_ceo_memory.prepare("SELECT playlist_id FROM channel_playlist WHERE id = 1").first();
+3612 [6]:             if (playlistRow && playlistRow.playlist_id) {
+3613 [7]:               await addVideoToPlaylist(accessToken, playlistRow.playlist_id, youtubeVideoId);
+3614 [7]:               console.log(`Added video id=${video.id} to channel playlist`);
+3615 [7]:             }
+3616 [6]:           } catch (playlistAddErr) {
+3617 [6]:             console.log(`Non-fatal: failed to add video id=${video.id} to playlist:`, playlistAddErr.message);
+3618 [6]:           }
+3619 [5]: 
+3620 [5]:           if (video.b2_file_ids) {
+3621 [6]:             try {
+3622 [7]:               const fileIds = JSON.parse(video.b2_file_ids);
+3623 [7]:               const cleanupAuthData = await b2Authorize(env);
+3624 [7]:               const cleanupApiUrl = cleanupAuthData.apiInfo.storageApi.apiUrl;
+3625 [7]:               const cleanupAuthToken = cleanupAuthData.authorizationToken;
+3626 [7]: 
+3627 [7]:               for (const key of ["video", "thumbnail", "audio"]) {
+3628 [8]:                 const fileInfo = fileIds[key];
+3629 [8]:                 if (fileInfo && fileInfo.fileId && fileInfo.fileName) {
+3630 [9]:                   await b2DeleteFileVersion(cleanupApiUrl, cleanupAuthToken, fileInfo.fileId, fileInfo.fileName);
+3631 [9]:                   console.log(`Deleted B2 file after publish: ${fileInfo.fileName}`);
+3632 [9]:                 }
+3633 [8]:               }
+3634 [7]:             } catch (cleanupErr) {
+3635 [7]:               console.log(`Non-fatal: B2 cleanup failed for video id=${video.id}:`, cleanupErr.message);
+3636 [7]:             }
+3637 [6]:           }
+3638 [5]:         } catch (publishErr) {
+3639 [5]:           console.log(`ERROR publishing video id=${video.id}:`, publishErr.message);
+3640 [5]: 
+3641 [5]:           if (publishErr.message.includes("youtubeSignupRequired")) {
+3642 [6]:             await env.ai_ceo_memory.prepare(
+3643 [6]:               "INSERT INTO system_alerts (alert_type, message) VALUES (?, ?)"
+3644 [6]:             ).bind("CHANNEL_SETUP_NEEDED", "YouTube channel has not been created yet for this account. Visit youtube.com while signed into the channel account and create the channel, then publishing will work automatically.").run();
+3645 [6]:           }
+3646 [5]:         }
+3647 [4]:       }
+3648 [3]: 
+3649 [3]:       const modSchedState = await env.ai_ceo_memory.prepare(
+3650 [3]:         "SELECT last_run_at FROM scheduler_state WHERE task_name = ?"
+3651 [3]:       ).bind("video_moderation_block").first();
+3652 [3]:       const modHoursSinceLastRun = modSchedState && modSchedState.last_run_at
+3653 [3]:         ? (Date.now() - new Date(modSchedState.last_run_at).getTime()) / (1000 * 60 * 60)
+3654 [3]:         : Infinity;
+3655 [3]: 
+3656 [3]:       if (modHoursSinceLastRun < 23) {
+3657 [4]:         console.log(`Skipping moderation/analytics block - ran ${modHoursSinceLastRun.toFixed(1)} hours ago, runs once daily.`);
+3658 [4]:       } else {
+3659 [4]:       const publishedVideos = await env.ai_ceo_memory.prepare(
+3660 [4]:         "SELECT v.id, v.content_plan_id, v.youtube_video_id, v.published_at, cp.title, cp.script FROM videos v JOIN content_plans cp ON v.content_plan_id = cp.id WHERE v.status = 'published' AND v.youtube_video_id IS NOT NULL"
+3661 [4]:       ).all();
+3662 [4]: 
+3663 [4]:       if (!sharedAccessToken) {
+3664 [5]:         console.log("Skipping moderation/analytics block this tick: shared YouTube access token unavailable.");
+3665 [5]:       } else {
+3666 [5]:       const modAccessToken = sharedAccessToken;
+3667 [5]:       const modOwnChannelId = sharedChannelId;
+3668 [5]: 
+3669 [5]:       for (const pubVideo of publishedVideos.results) {
+3670 [6]:         try {
+3671 [7]:           const videoStatus = await getVideoStatus(modAccessToken, pubVideo.youtube_video_id);
+3672 [7]: 
+3673 [7]:           if (!videoStatus.exists || videoStatus.privacyStatus === "private" || videoStatus.rejectionReason) {
+3674 [8]:             const reason = !videoStatus.exists
+3675 [8]:               ? "video no longer exists on YouTube"
+3676 [8]:               : videoStatus.rejectionReason
+3677 [8]:                 ? `rejected: ${videoStatus.rejectionReason}`
+3678 [8]:                 : "privacy status changed to private (likely a platform strike)";
+3679 [8]: 
+3680 [8]:             console.log(`MODERATION: video id=${pubVideo.id} (youtube_video_id=${pubVideo.youtube_video_id}) flagged: ${reason}`);
+3681 [8]: 

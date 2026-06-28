@@ -3518,8 +3518,50 @@ const scriptWords = generatedScript.trim().split(/\s+/).filter(w => w.length > 0
           if (video.target_publish_hour !== null && video.target_publish_hour !== undefined) {
             await markHourUsed(env, video.target_publish_hour);
             console.log(`Marked hour ${video.target_publish_hour} as used in rotation`);
+      }
 
-      // ---- Self-modification: publish-hour trial (propose) ----
+          }
+
+          try {
+            const playlistRow = await env.ai_ceo_memory.prepare("SELECT playlist_id FROM channel_playlist WHERE id = 1").first();
+            if (playlistRow && playlistRow.playlist_id) {
+              await addVideoToPlaylist(accessToken, playlistRow.playlist_id, youtubeVideoId);
+              console.log(`Added video id=${video.id} to channel playlist`);
+            }
+          } catch (playlistAddErr) {
+            console.log(`Non-fatal: failed to add video id=${video.id} to playlist:`, playlistAddErr.message);
+          }
+
+          if (video.b2_file_ids) {
+            try {
+              const fileIds = JSON.parse(video.b2_file_ids);
+              const cleanupAuthData = await b2Authorize(env);
+              const cleanupApiUrl = cleanupAuthData.apiInfo.storageApi.apiUrl;
+              const cleanupAuthToken = cleanupAuthData.authorizationToken;
+
+              for (const key of ["video", "thumbnail", "audio"]) {
+                const fileInfo = fileIds[key];
+                if (fileInfo && fileInfo.fileId && fileInfo.fileName) {
+                  await b2DeleteFileVersion(cleanupApiUrl, cleanupAuthToken, fileInfo.fileId, fileInfo.fileName);
+                  console.log(`Deleted B2 file after publish: ${fileInfo.fileName}`);
+                }
+              }
+            } catch (cleanupErr) {
+              console.log(`Non-fatal: B2 cleanup failed for video id=${video.id}:`, cleanupErr.message);
+            }
+          }
+        } catch (publishErr) {
+          console.log(`ERROR publishing video id=${video.id}:`, publishErr.message);
+
+          if (publishErr.message.includes("youtubeSignupRequired")) {
+            await env.ai_ceo_memory.prepare(
+              "INSERT INTO system_alerts (alert_type, message) VALUES (?, ?)"
+            ).bind("CHANNEL_SETUP_NEEDED", "YouTube channel has not been created yet for this account. Visit youtube.com while signed into the channel account and create the channel, then publishing will work automatically.").run();
+          }
+        }
+      }
+
+            // ---- Self-modification: publish-hour trial (propose) ----
       try {
         const newTrialId = await maybeProposePublishHourTrial(env);
         if (newTrialId) {
@@ -3604,48 +3646,8 @@ const scriptWords = generatedScript.trim().split(/\s+/).filter(w => w.length > 0
         );
       } catch (selfModSweepErr) {
         console.log("Non-fatal: self-mod entry sweep failed:", selfModSweepErr.message);
-      }
 
-          }
-
-          try {
-            const playlistRow = await env.ai_ceo_memory.prepare("SELECT playlist_id FROM channel_playlist WHERE id = 1").first();
-            if (playlistRow && playlistRow.playlist_id) {
-              await addVideoToPlaylist(accessToken, playlistRow.playlist_id, youtubeVideoId);
-              console.log(`Added video id=${video.id} to channel playlist`);
-            }
-          } catch (playlistAddErr) {
-            console.log(`Non-fatal: failed to add video id=${video.id} to playlist:`, playlistAddErr.message);
-          }
-
-          if (video.b2_file_ids) {
-            try {
-              const fileIds = JSON.parse(video.b2_file_ids);
-              const cleanupAuthData = await b2Authorize(env);
-              const cleanupApiUrl = cleanupAuthData.apiInfo.storageApi.apiUrl;
-              const cleanupAuthToken = cleanupAuthData.authorizationToken;
-
-              for (const key of ["video", "thumbnail", "audio"]) {
-                const fileInfo = fileIds[key];
-                if (fileInfo && fileInfo.fileId && fileInfo.fileName) {
-                  await b2DeleteFileVersion(cleanupApiUrl, cleanupAuthToken, fileInfo.fileId, fileInfo.fileName);
-                  console.log(`Deleted B2 file after publish: ${fileInfo.fileName}`);
-                }
-              }
-            } catch (cleanupErr) {
-              console.log(`Non-fatal: B2 cleanup failed for video id=${video.id}:`, cleanupErr.message);
-            }
-          }
-        } catch (publishErr) {
-          console.log(`ERROR publishing video id=${video.id}:`, publishErr.message);
-
-          if (publishErr.message.includes("youtubeSignupRequired")) {
-            await env.ai_ceo_memory.prepare(
-              "INSERT INTO system_alerts (alert_type, message) VALUES (?, ?)"
-            ).bind("CHANNEL_SETUP_NEEDED", "YouTube channel has not been created yet for this account. Visit youtube.com while signed into the channel account and create the channel, then publishing will work automatically.").run();
-          }
-        }
-      }
+      
 
       const modSchedState = await env.ai_ceo_memory.prepare(
         "SELECT last_run_at FROM scheduler_state WHERE task_name = ?"
