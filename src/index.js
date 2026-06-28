@@ -3518,8 +3518,6 @@ const scriptWords = generatedScript.trim().split(/\s+/).filter(w => w.length > 0
           if (video.target_publish_hour !== null && video.target_publish_hour !== undefined) {
             await markHourUsed(env, video.target_publish_hour);
             console.log(`Marked hour ${video.target_publish_hour} as used in rotation`);
-      }
-
           }
 
           try {
