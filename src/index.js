@@ -1407,6 +1407,11 @@ async function markHourUsed(env, hour) {
   ).bind(hour).run();
 }
 
+const INFRA_FAILURE_PATTERNS = [/524/, /502/, /503/, /ETIMEDOUT/i, /ECONNRESET/i, /ECONNREFUSED/i, /fetch failed/i, /network/i, /timeout/i, /timed out/i];
+function isInfraFailure(errMessage) {
+  const msg = errMessage || "";
+  return INFRA_FAILURE_PATTERNS.some(pattern => pattern.test(msg));
+}
 const DAILY_NEURON_BUDGET = 10000;
 const ESTIMATED_NEURON_COST = {
   text_generation: 150,
@@ -3427,12 +3432,16 @@ const scriptWords = generatedScript.trim().split(/\s+/).filter(w => w.length > 0
           console.log(`Video fully assembled for content_plan_id=${contentPlanId}: ${finalVideoFileName} (fileId: ${assembleResult.fileId})`);
         } catch (videoErr) {
           console.log(`ERROR generating/uploading video assets for content_plan_id=${contentPlanId}:`, videoErr.message);
-          try {
-            await env.ai_ceo_memory.prepare(
-              "UPDATE content_plans SET failed_attempts = failed_attempts + 1 WHERE id = ?"
-            ).bind(contentPlanId).run();
-          } catch (counterErr) {
-            console.log("Non-fatal: could not increment failed_attempts:", counterErr.message);
+          if (isInfraFailure(videoErr.message)) {
+            console.log(`Infra-classified failure for content_plan_id=${contentPlanId} (not counted against failed_attempts): ${videoErr.message}`);
+          } else {
+            try {
+              await env.ai_ceo_memory.prepare(
+                "UPDATE content_plans SET failed_attempts = failed_attempts + 1 WHERE id = ?"
+              ).bind(contentPlanId).run();
+            } catch (counterErr) {
+              console.log("Non-fatal: could not increment failed_attempts:", counterErr.message);
+            }
           }
           try {
             await env.ai_ceo_memory.prepare(
