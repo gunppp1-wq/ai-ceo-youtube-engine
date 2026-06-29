@@ -6,6 +6,7 @@ import { maybeProposeWorkersPlanUpgrade, recordBacklogSnapshot } from "./payment
 import { proposeAndDeployCodeChange, judgeCodeChange, rollbackCodeChange } from "./code-self-mod.js";
 import { maybeAttemptCodeSelfModification } from "./code-self-mod-trigger.js";
 import { maybeProposeSpeedLimitIncrease, applyApprovedSpeedLimitIncrease, getProposalPrecedents } from "./speed-limit-proposal.js";
+import { shouldRunResearchProposal, markResearchProposalRun, generateWeeklyResearchProposal } from "./research-proposal.js";
 
 async function b2Authorize(env, keyId, applicationKey) {
   const useKeyId = keyId || env.B2_KEY_ID;
@@ -3930,6 +3931,11 @@ Respond with only the reflection, no preamble.`;
       if (await shouldRunWeeklyAudit(env)) {
         await runWeeklyNeuronCostAudit(env);
         await markWeeklyAuditRun(env);
+      }
+
+      if (await shouldRunResearchProposal(env)) {
+        await generateWeeklyResearchProposal(env);
+        await markResearchProposalRun(env);
       }
 
       try {
