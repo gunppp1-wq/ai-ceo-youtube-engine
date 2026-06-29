@@ -2720,7 +2720,10 @@ export default {
           "SELECT COUNT(*) as cnt FROM self_mod_entries WHERE status = 'open'"
         ).first();
 
-        const neuronsRow = todayUsage.results.find(r => r.op_type === "neurons_estimated");
+
+        const deadLetterPlans = await env.ai_ceo_memory.prepare(
+          "SELECT cp.id, cp.title, cp.failed_attempts, cp.created_at FROM content_plans cp WHERE cp.failed_attempts >= 3 AND NOT EXISTS (SELECT 1 FROM videos v WHERE v.content_plan_id = cp.id) ORDER BY cp.id ASC"
+        ).all();        const neuronsRow = todayUsage.results.find(r => r.op_type === "neurons_estimated");
         const estimatedNeuronsUsedToday = neuronsRow ? neuronsRow.count : 0;
         const neuronBudgetStatus = {
           estimated_used_today: estimatedNeuronsUsedToday,
@@ -2747,7 +2750,8 @@ export default {
           publish_hour_rotation: rotationStatus.results,
           last_published_at: lastPublishedVideo?.published_at || null,
           open_self_mod_entries: openSelfModCount?.cnt || 0,
-          neuron_budget_status: neuronBudgetStatus
+          neuron_budget_status: neuronBudgetStatus,
+          dead_letter_content_plans: deadLetterPlans.results
         }, null, 2), {
           headers: { "Content-Type": "application/json" }
         });
