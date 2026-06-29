@@ -1485,6 +1485,27 @@ async function runWeeklyNeuronCostAudit(env) {
     }
   }
 }
+async function retryWithBackoff(fn, options = {}) {
+  const maxAttempts = options.maxAttempts || 3;
+  const baseDelayMs = options.baseDelayMs || 1000;
+  const label = options.label || "operation";
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      console.log(`${label}: attempt ${attempt}/${maxAttempts} failed: ${err.message}`);
+      if (attempt === maxAttempts) {
+        throw err;
+      }
+      const delay = baseDelayMs * Math.pow(2, attempt - 1);
+      console.log(`${label}: retrying in ${delay}ms...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  throw lastErr;
+}
 const DAILY_NEURON_BUDGET = 10000;
 const ESTIMATED_NEURON_COST = {
   text_generation: 150,
