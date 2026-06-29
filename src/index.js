@@ -1427,6 +1427,64 @@ function getTopicAnchorHashtags(title) {
   }
   return [];
 }
+const WEEKLY_AUDIT_TASK_NAME = "weekly_self_audit";
+const WEEKLY_AUDIT_GATE_HOURS = 24 * 7;
+async function shouldRunWeeklyAudit(env) {
+  const row = await env.ai_ceo_memory.prepare(
+    "SELECT last_run_at FROM scheduler_state WHERE task_name = ?"
+  ).bind(WEEKLY_AUDIT_TASK_NAME).first();
+  const hoursSinceLastRun = row && row.last_run_at
+    ? (Date.now() - new Date(row.last_run_at).getTime()) / (1000 * 60 * 60)
+    : Infinity;
+  return hoursSinceLastRun >= WEEKLY_AUDIT_GATE_HOURS;
+}
+async function markWeeklyAuditRun(env) {
+  await env.ai_ceo_memory.prepare(
+    "INSERT INTO scheduler_state (task_name, last_run_at) VALUES (?, ?) ON CONFLICT(task_name) DO UPDATE SET last_run_at = excluded.last_run_at"
+  ).bind(WEEKLY_AUDIT_TASK_NAME, new Date().toISOString()).run();
+}
+async function runWeeklyNeuronCostAudit(env) {
+  try {
+    const pricingRes = await fetch("https://developers.cloudflare.com/workers-ai/platform/pricing/");
+    if (!pricingRes.ok) {
+      console.log(`Weekly audit: Cloudflare pricing page fetch failed with status ${pricingRes.status}, skipping this week's check.`);
+      return;
+    }
+    const pricingHtml = await pricingRes.text();
+    const checks = [
+      { codeKey: "tts", modelName: "@cf/deepgram/aura-2-en", currentEstimate: ESTIMATED_NEURON_COST.tts },
+      { codeKey: "text_generation", modelName: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", currentEstimate: ESTIMATED_NEURON_COST.text_generation },
+      { codeKey: "image_generation", modelName: "@cf/black-forest-labs/flux-1-schnell", currentEstimate: ESTIMATED_NEURON_COST.image_generation }
+    ];
+    const findings = [];
+    for (const check of checks) {
+      const modelMentioned = pricingHtml.includes(check.modelName);
+      findings.push({
+        op_type: check.codeKey,
+        model: check.modelName,
+        current_estimate: check.currentEstimate,
+        model_found_on_pricing_page: modelMentioned
+      });
+    }
+    const allModelsFound = findings.every(f => f.model_found_on_pricing_page);
+    const alertMessage = allModelsFound
+      ? `Weekly neuron-cost audit ran. All ${findings.length} tracked models still listed on Cloudflare's pricing page. Current estimates: ${JSON.stringify(checks.map(c => ({ [c.codeKey]: c.currentEstimate })))}.`
+      : `Weekly neuron-cost audit found a model NOT present on Cloudflare's current pricing page: ${findings.filter(f => !f.model_found_on_pricing_page).map(f => f.model).join(", ")}. This needs human investigation.`;
+    await env.ai_ceo_memory.prepare(
+      "INSERT INTO system_alerts (alert_type, message) VALUES (?, ?)"
+    ).bind(allModelsFound ? "WEEKLY_AUDIT_OK" : "WEEKLY_AUDIT_MODEL_MISSING", alertMessage).run();
+    console.log(`Weekly self-audit completed: ${alertMessage}`);
+  } catch (auditErr) {
+    console.log("Non-fatal: weekly self-audit failed:", auditErr.message);
+    try {
+      await env.ai_ceo_memory.prepare(
+        "INSERT INTO system_alerts (alert_type, message) VALUES (?, ?)"
+      ).bind("WEEKLY_AUDIT_FAILED", `Weekly self-audit threw an error and could not complete: ${auditErr.message}`).run();
+    } catch (alertErr) {
+      console.log("Non-fatal: could not log weekly audit failure to system_alerts:", alertErr.message);
+    }
+  }
+}
 const DAILY_NEURON_BUDGET = 10000;
 const ESTIMATED_NEURON_COST = {
   text_generation: 150,
@@ -3842,6 +3900,10 @@ Respond with only the reflection, no preamble.`;
         "INSERT INTO scheduler_state (task_name, last_run_at) VALUES (?, ?) ON CONFLICT(task_name) DO UPDATE SET last_run_at = excluded.last_run_at"
       ).bind("video_moderation_block", new Date().toISOString()).run();
       }
+      }
+      if (await shouldRunWeeklyAudit(env)) {
+        await runWeeklyNeuronCostAudit(env);
+        await markWeeklyAuditRun(env);
       }
 
       try {
