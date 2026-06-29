@@ -2731,7 +2731,8 @@ export default {
           estimated_remaining: Math.max(0, DAILY_NEURON_BUDGET - estimatedNeuronsUsedToday),
           percent_used: Math.min(100, ((estimatedNeuronsUsedToday / DAILY_NEURON_BUDGET) * 100)).toFixed(1),
           reliability_warning: "This tracker is known to undercount: some AI calls (image generation, post-mortem reflections, strategy reasoning) may not report their cost here. Treat as a lower bound, not an exact total."
-        };
+,
+          real_quota_mismatch_detected: (estimatedNeuronsUsedToday < DAILY_NEURON_BUDGET * 0.5) && (todayUsage.results.some(function(r) { return r.op_type === "ai_quota_exhausted"; }))        };
 
         return new Response(JSON.stringify({
           published_videos: totalVideos?.cnt || 0,
