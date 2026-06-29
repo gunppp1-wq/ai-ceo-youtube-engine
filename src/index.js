@@ -2899,12 +2899,20 @@ export default {
           const title = item.snippet.title;
           const views = parseInt(item.statistics.viewCount || "0", 10);
 
-          const existing = await env.ai_ceo_memory.prepare(
-            "SELECT id FROM trends WHERE topic = ? AND collected_at > datetime('now', '-12 hours')"
-          ).bind(title).first();
+          let existing = null;
+          try {
+            existing = await env.ai_ceo_memory.prepare(
+              "SELECT id, topic FROM trends WHERE topic LIKE ? AND collected_at > datetime('now', '-12 hours')"
+            ).bind(`%${title.split(" ").slice(0, 3).join(" ")}%`).first();
+          } catch (dedupErr) {
+            console.log("WARNING: trend dedup LIKE check failed, falling back to exact match only:", dedupErr.message);
+            existing = await env.ai_ceo_memory.prepare(
+              "SELECT id FROM trends WHERE topic = ? AND collected_at > datetime('now', '-12 hours')"
+            ).bind(title).first();
+          }
 
           if (existing) {
-            console.log("Skipping duplicate trend within 12h:", title);
+            console.log(`Skipping duplicate/near-duplicate trend within 12h: "${title}" matches existing trend id=${existing.id}`);
             continue;
           }
 
