@@ -3640,12 +3640,13 @@ const scriptWords = generatedScript.trim().split(/\s+/).filter(w => w.length > 0
 
           if (video.thumbnail_url) {
             try {
-              const thumbFileRes = await fetch(video.thumbnail_url);
-              if (thumbFileRes.ok) {
+              await retryWithBackoff(async () => {
+                const thumbFileRes = await fetch(video.thumbnail_url);
+                if (!thumbFileRes.ok) throw new Error(`Thumbnail fetch failed: ${thumbFileRes.status}`);
                 const thumbnailBytes = new Uint8Array(await thumbFileRes.arrayBuffer());
                 await setYoutubeThumbnail(accessToken, youtubeVideoId, thumbnailBytes);
-                console.log(`Thumbnail set for videoId=${youtubeVideoId}`);
-              }
+              }, { maxAttempts: 2, baseDelayMs: 500, label: `thumbnail set for videoId=${youtubeVideoId}` });
+              console.log(`Thumbnail set for videoId=${youtubeVideoId}`);
             } catch (thumbErr) {
               console.log(`Non-fatal: failed to set thumbnail for videoId=${youtubeVideoId}:`, thumbErr.message);
             }
