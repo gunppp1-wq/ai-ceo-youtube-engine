@@ -1412,6 +1412,21 @@ function isInfraFailure(errMessage) {
   const msg = errMessage || "";
   return INFRA_FAILURE_PATTERNS.some(pattern => pattern.test(msg));
 }
+const TOPIC_ANCHOR_HASHTAGS = [
+  { match: ["spiderman", "spidey", "marvel", "avengers", "x-men", "dc", "batman", "superman"], tags: ["#marvel", "#superhero"] },
+  { match: ["gta", "grand theft auto", "playstation", "xbox", "nintendo", "ps5", "videogame", "video game"], tags: ["#gaming", "#videogames"] },
+  { match: ["movie", "trailer", "film", "box office"], tags: ["#movies", "#film"] },
+  { match: ["theory", "theories", "lore", "explained", "mystery"], tags: ["#theory", "#explained"] },
+];
+function getTopicAnchorHashtags(title) {
+  const lower = (title || "").toLowerCase();
+  for (const entry of TOPIC_ANCHOR_HASHTAGS) {
+    if (entry.match.some(kw => lower.includes(kw))) {
+      return entry.tags;
+    }
+  }
+  return [];
+}
 const DAILY_NEURON_BUDGET = 10000;
 const ESTIMATED_NEURON_COST = {
   text_generation: 150,
@@ -3505,7 +3520,8 @@ const scriptWords = generatedScript.trim().split(/\s+/).filter(w => w.length > 0
           if (!videoFileRes.ok) throw new Error(`Failed to download video file from B2: ${videoFileRes.status}`);
           const videoBytes = new Uint8Array(await videoFileRes.arrayBuffer());
 
-          const shortsDescription = `${plan.script}\n\nNew videos posted regularly - subscribe so you don't miss the next one.\n\n#Shorts`;
+          const topicAnchorHashtags = getTopicAnchorHashtags(plan.title);
+          const shortsDescription = `${plan.script}\n\nNew videos posted regularly - subscribe so you don't miss the next one.\n\n#Shorts${topicAnchorHashtags.length ? " " + topicAnchorHashtags.join(" ") : ""}`;
           const videoCategoryId = detectVideoCategory(plan.title);
           const videoTags = generateTags(plan.title);
           const uploadResult = await uploadVideoToYoutube(accessToken, videoBytes, plan.title, shortsDescription, videoCategoryId, videoTags);
