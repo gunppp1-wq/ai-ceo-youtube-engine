@@ -1410,7 +1410,7 @@ async function markHourUsed(env, hour) {
 const DAILY_NEURON_BUDGET = 10000;
 const ESTIMATED_NEURON_COST = {
   text_generation: 150,
-  tts: 8200,
+  tts: 2000,
   image_generation: 700
 };
 
