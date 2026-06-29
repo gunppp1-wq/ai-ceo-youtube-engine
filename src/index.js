@@ -3803,7 +3803,7 @@ const scriptWords = generatedScript.trim().split(/\s+/).filter(w => w.length > 0
         console.log(`Skipping moderation/analytics block - ran ${modHoursSinceLastRun.toFixed(1)} hours ago, runs once daily.`);
       } else {
       const publishedVideos = await env.ai_ceo_memory.prepare(
-        "SELECT v.id, v.content_plan_id, v.youtube_video_id, v.published_at, cp.title, cp.script FROM videos v JOIN content_plans cp ON v.content_plan_id = cp.id WHERE v.status = 'published' AND v.youtube_video_id IS NOT NULL"
+        "SELECT v.id, v.content_plan_id, v.youtube_video_id, v.published_at, v.last_moderation_check_at, cp.title, cp.script FROM videos v JOIN content_plans cp ON v.content_plan_id = cp.id WHERE v.status = 'published' AND v.youtube_video_id IS NOT NULL"
       ).all();
 
       if (!sharedAccessToken) {
@@ -3814,7 +3814,24 @@ const scriptWords = generatedScript.trim().split(/\s+/).filter(w => w.length > 0
 
       for (const pubVideo of publishedVideos.results) {
         try {
-          const videoStatus = await getVideoStatus(modAccessToken, pubVideo.youtube_video_id);
+          const hoursSinceLastModCheck = pubVideo.last_moderation_check_at
+            ? (Date.now() - new Date(pubVideo.last_moderation_check_at).getTime()) / (1000 * 60 * 60)
+            : Infinity;
+          const videoAgeDays = pubVideo.published_at
+            ? (Date.now() - new Date(pubVideo.published_at + "Z").getTime()) / (1000 * 60 * 60 * 24)
+            : 0;
+          const shouldCheckModeration = videoAgeDays < 7 || hoursSinceLastModCheck >= 24 * 30;
+
+          let videoStatus;
+          if (shouldCheckModeration) {
+            videoStatus = await getVideoStatus(modAccessToken, pubVideo.youtube_video_id);
+            await env.ai_ceo_memory.prepare(
+              "UPDATE videos SET last_moderation_check_at = ? WHERE id = ?"
+            ).bind(new Date().toISOString(), pubVideo.id).run();
+          } else {
+            console.log(`Skipping moderation re-check for video id=${pubVideo.id}: ${videoAgeDays.toFixed(1)} days old, checked ${hoursSinceLastModCheck.toFixed(0)}h ago.`);
+            videoStatus = { exists: true, privacyStatus: "public", rejectionReason: null };
+          }
 
           if (!videoStatus.exists || videoStatus.privacyStatus === "private" || videoStatus.rejectionReason) {
             const reason = !videoStatus.exists
