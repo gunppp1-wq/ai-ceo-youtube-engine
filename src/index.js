@@ -2633,6 +2633,23 @@ export default {
         const todayUsage = await env.ai_ceo_memory.prepare("SELECT op_type, count FROM daily_usage WHERE usage_date = ?").bind(today).all();
         const recentAlerts = await env.ai_ceo_memory.prepare("SELECT alert_type, message, created_at FROM system_alerts ORDER BY id DESC LIMIT 5").all();
         const rotationStatus = await env.ai_ceo_memory.prepare("SELECT hour, last_used_at FROM publish_hour_rotation ORDER BY hour ASC").all();
+        const lastPublishedVideo = await env.ai_ceo_memory.prepare(
+          "SELECT published_at FROM videos WHERE status = 'published' ORDER BY published_at DESC LIMIT 1"
+        ).first();
+
+        const openSelfModCount = await env.ai_ceo_memory.prepare(
+          "SELECT COUNT(*) as cnt FROM self_mod_entries WHERE status = 'open'"
+        ).first();
+
+        const neuronsRow = todayUsage.results.find(r => r.op_type === "neurons_estimated");
+        const estimatedNeuronsUsedToday = neuronsRow ? neuronsRow.count : 0;
+        const neuronBudgetStatus = {
+          estimated_used_today: estimatedNeuronsUsedToday,
+          daily_budget: DAILY_NEURON_BUDGET,
+          estimated_remaining: Math.max(0, DAILY_NEURON_BUDGET - estimatedNeuronsUsedToday),
+          percent_used: Math.min(100, ((estimatedNeuronsUsedToday / DAILY_NEURON_BUDGET) * 100)).toFixed(1),
+          reliability_warning: "This tracker is known to undercount: some AI calls (image generation, post-mortem reflections, strategy reasoning) may not report their cost here. Treat as a lower bound, not an exact total."
+        };
 
         return new Response(JSON.stringify({
           published_videos: totalVideos?.cnt || 0,
@@ -2648,7 +2665,10 @@ export default {
           recent_comments: recentComments.results,
           today_usage: todayUsage.results,
           recent_alerts: recentAlerts.results,
-          publish_hour_rotation: rotationStatus.results
+          publish_hour_rotation: rotationStatus.results,
+          last_published_at: lastPublishedVideo?.published_at || null,
+          open_self_mod_entries: openSelfModCount?.cnt || 0,
+          neuron_budget_status: neuronBudgetStatus
         }, null, 2), {
           headers: { "Content-Type": "application/json" }
         });
