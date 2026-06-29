@@ -64,8 +64,20 @@ const ALL_MODULE_FILES = [
   "publish-hour-self-mod.js",
   "payment-proposal-trigger.js",
   "code-self-mod.js",
-  "gate-integrity-check.js"
+  "gate-integrity-check.js",
+  "code-self-mod-trigger.js",
+  "speed-limit-proposal.js"
 ];
+// NOTE: delayed-failure-detection.js and research-proposal.js (added
+// 2026-06-29) are DELIBERATELY EXCLUDED from this list, per explicit
+// operator decision. Both are newly-built, unproven safety/propose-only
+// modules whose entire value depends on a specific constraint (never
+// deploying anything themselves) - letting the self-mod system modify
+// its own watchdog code is a meaningfully different risk than modifying
+// ordinary feature files. Revisit this exclusion only after these two
+// modules have run reliably for a meaningful period and the operator
+// explicitly agrees to extend trust to them, the same way protected-core.js
+// itself is permanently excluded by design.
 
 /**
  * Fetches the CURRENT live content of EVERY module file from Cloudflare's

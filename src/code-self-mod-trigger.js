@@ -1,5 +1,5 @@
-// ============================================================
-// SELF-MODIFICATION TRIGGER — broad mandate, per the build spec:
+﻿// ============================================================
+// SELF-MODIFICATION TRIGGER ??broad mandate, per the build spec:
 // "the program may attempt a code/logic/strategy modification on its
 // own initiative." No narrow metric defines this trigger; the program
 // itself decides whether something is worth attempting, each cron tick,
@@ -13,7 +13,7 @@ import { proposeAndDeployCodeChange } from "./code-self-mod.js";
 
 /**
  * Gathers a broad snapshot of recent system signals for the program to
- * reason over — not a narrow metric, just real, current context so its
+ * reason over ??not a narrow metric, just real, current context so its
  * decision is grounded in actual state rather than guessing blind.
  */
 async function gatherSystemSnapshot(env) {
@@ -34,7 +34,7 @@ async function gatherSystemSnapshot(env) {
     .all();
 
   // Internal-only lessons from past reverted attempts. Per the spec these
-  // are NEVER surfaced on the reporting page — they exist only to inform
+  // are NEVER surfaced on the reporting page ??they exist only to inform
   // this decision-making prompt, nothing else reads or displays them.
   const lessons = await env.ai_ceo_memory
     .prepare("SELECT lesson FROM self_mod_lessons ORDER BY id DESC LIMIT 5")
@@ -72,7 +72,7 @@ RECENT VIDEO PERFORMANCE (last 10): ${JSON.stringify(snapshot.recentVideoPerform
 
 ${lessonsBlock}
 
-You may target any file EXCEPT: protected-core.js, self-mod-lifecycle.js, code-self-mod.js (these are permanently off-limits, do not propose changes to them under any framing).
+You may ONLY target one of these exact filenames - do not invent or guess any other filename: index.js, notifications.js, publish-hour-self-mod.js, payment-proposal-trigger.js, gate-integrity-check.js, code-self-mod-trigger.js, speed-limit-proposal.js. (protected-core.js, self-mod-lifecycle.js, and code-self-mod.js are permanently off-limits and must never be proposed under any framing - they are intentionally excluded from the allowed list above.)
 
 IMPORTANT: if your proposed change depends on any paid-tier resource (e.g. a raised neuron budget, a higher rate limit, a paid third-party service), it must still function correctly if that resource later becomes unavailable (payment lapses, reverts to free tier). Do not write logic that assumes a paid tier is permanent - always include a fallback to free-tier behavior. State explicitly in WHY if your change has any paid-tier dependency and what the fallback is.
 
