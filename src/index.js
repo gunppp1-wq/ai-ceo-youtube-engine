@@ -7,6 +7,7 @@ import { proposeAndDeployCodeChange, judgeCodeChange, rollbackCodeChange } from 
 import { maybeAttemptCodeSelfModification } from "./code-self-mod-trigger.js";
 import { maybeProposeSpeedLimitIncrease, applyApprovedSpeedLimitIncrease, getProposalPrecedents } from "./speed-limit-proposal.js";
 import { shouldRunResearchProposal, markResearchProposalRun, generateWeeklyResearchProposal } from "./research-proposal.js";
+import { shouldRunDelayedFailureSweep, markDelayedFailureSweepRun, runDelayedFailureSweep } from "./delayed-failure-detection.js";
 
 async function b2Authorize(env, keyId, applicationKey) {
   const useKeyId = keyId || env.B2_KEY_ID;
@@ -3939,6 +3940,11 @@ Respond with only the reflection, no preamble.`;
       if (await shouldRunResearchProposal(env)) {
         await generateWeeklyResearchProposal(env);
         await markResearchProposalRun(env);
+      }
+
+      if (await shouldRunDelayedFailureSweep(env)) {
+        await runDelayedFailureSweep(env);
+        await markDelayedFailureSweepRun(env);
       }
 
       try {
