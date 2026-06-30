@@ -3458,7 +3458,8 @@ export default {
             console.log(`Using Piper TTS for content_plan_id=${contentPlanId}`);
           } else {
             if (await isAiQuotaExhaustedToday(env)) {
-              throw new Error("Skipping Aura-2: AI quota already confirmed exhausted today, avoiding wasted request.");
+              console.log(`Skipping asset generation for content_plan_id=${contentPlanId}: AI quota confirmed exhausted today. Will retry next day.`);
+              continue;
             }
             const AURA2_VOICES = ["luna", "asteria", "athena", "hera", "aurora", "iris", "thalia", "orion", "apollo", "atlas"];
             const selectedVoice = AURA2_VOICES[contentPlanId % AURA2_VOICES.length];
