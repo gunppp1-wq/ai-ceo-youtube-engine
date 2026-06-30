@@ -3950,19 +3950,23 @@ Respond with only the reflection, no preamble.`;
       ).bind("video_moderation_block", new Date().toISOString()).run();
       }
       }
-      if (await shouldRunWeeklyAudit(env)) {
-        await runWeeklyNeuronCostAudit(env);
-        await markWeeklyAuditRun(env);
-      }
+      if (videosToPublish.results.length === 0) {
+        if (await shouldRunWeeklyAudit(env)) {
+          await runWeeklyNeuronCostAudit(env);
+          await markWeeklyAuditRun(env);
+        }
 
-      if (await shouldRunResearchProposal(env)) {
-        await generateWeeklyResearchProposal(env);
-        await markResearchProposalRun(env);
-      }
+        if (await shouldRunResearchProposal(env)) {
+          await generateWeeklyResearchProposal(env);
+          await markResearchProposalRun(env);
+        }
 
-      if (await shouldRunDelayedFailureSweep(env)) {
-        await runDelayedFailureSweep(env);
-        await markDelayedFailureSweepRun(env);
+        if (await shouldRunDelayedFailureSweep(env)) {
+          await runDelayedFailureSweep(env);
+          await markDelayedFailureSweepRun(env);
+        }
+      } else {
+        console.log(`Skipping weekly audit/research-proposal/delayed-failure sweep this tick: ${videosToPublish.results.length} video(s) pending publish get subrequest priority.`);
       }
 
       try {
