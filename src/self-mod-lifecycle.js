@@ -260,5 +260,17 @@ async function sendEntryNotification(env, entryId, eventType) {
       : `This change was reverted.\nWhat changed: ${entry.what_changed}\nReason: ${entry.revert_reason || "not specified"}\n\nView on dashboard: ${dashboardLink}`;
   }
 
-  await sendEmail(env, subject, body);
+  const result = await sendEmail(env, subject, body);
+  if (!result.sent) {
+    // sendEmail already console.error'd the details, but Worker logs are
+    // ephemeral and nothing else reads them - persist a trace here so a
+    // broken notification path is visible via /status instead of silent.
+    try {
+      await env.ai_ceo_memory.prepare(
+        "INSERT INTO system_alerts (alert_type, message) VALUES (?, ?)"
+      ).bind("NOTIFICATION_SEND_FAILED", `Email for self-mod entry id=${entryId} (${eventType}) failed: ${result.reason}${result.message ? " - " + result.message : ""}`).run();
+    } catch (alertErr) {
+      console.error("LOUD LOG: could not record NOTIFICATION_SEND_FAILED alert:", alertErr.message);
+    }
+  }
 }
