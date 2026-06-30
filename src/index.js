@@ -1414,6 +1414,119 @@ function isInfraFailure(errMessage) {
   const msg = errMessage || "";
   return INFRA_FAILURE_PATTERNS.some(pattern => pattern.test(msg));
 }
+
+const RENDER_ASSEMBLER_URL = "https://ai-ceo-video-assembler.onrender.com";
+// Hard ceiling on Render-restart re-queues for a single assembly job.
+// Prevents a permanently-crashing job from polling forever.
+const ASSEMBLY_REQUEUE_CEILING = 5;
+
+async function pollAssemblingVideos(env) {
+  let assembling;
+  try {
+    assembling = await env.ai_ceo_memory.prepare(
+      "SELECT id, content_plan_id, assembly_job_id, assembly_requeue_count, assembly_payload FROM videos WHERE status = 'assembling'"
+    ).all();
+  } catch (err) {
+    console.log("Non-fatal: could not query assembling videos:", err.message);
+    return;
+  }
+  if (!assembling.results.length) return;
+
+  console.log(`Polling ${assembling.results.length} assembling video(s)...`);
+
+  for (const row of assembling.results) {
+    try {
+      let statusRes;
+      try {
+        statusRes = await fetch(`${RENDER_ASSEMBLER_URL}/job-status/${row.assembly_job_id}`, {
+          signal: AbortSignal.timeout(15000)
+        });
+      } catch (fetchErr) {
+        console.log(`Non-fatal: job-status fetch failed for video id=${row.id} (content_plan_id=${row.content_plan_id}): ${fetchErr.message}`);
+        continue;
+      }
+
+      if (statusRes.status === 404) {
+        // Render restarted — job is gone from its in-memory store.
+        // Re-queue WITHOUT incrementing failed_attempts; only the requeue counter moves.
+        const newRequeueCount = (row.assembly_requeue_count || 0) + 1;
+        if (newRequeueCount > ASSEMBLY_REQUEUE_CEILING) {
+          console.log(`LOUD LOG: Assembly for content_plan_id=${row.content_plan_id} exceeded re-queue ceiling (${newRequeueCount} Render restarts). Marking as permanent failure.`);
+          await env.ai_ceo_memory.prepare("DELETE FROM videos WHERE id = ?").bind(row.id).run();
+          await env.ai_ceo_memory.prepare("UPDATE content_plans SET failed_attempts = failed_attempts + 1 WHERE id = ?").bind(row.content_plan_id).run();
+          try {
+            await env.ai_ceo_memory.prepare("INSERT INTO system_alerts (alert_type, message) VALUES (?, ?)")
+              .bind("ASSET_GENERATION_FAILED", `content_plan_id=${row.content_plan_id}: Assembly exceeded re-queue ceiling (${newRequeueCount} Render restarts). Marked as permanent failure.`).run();
+          } catch {}
+        } else {
+          console.log(`Assembly job ${row.assembly_job_id} not found on Render (restart). Re-queuing attempt ${newRequeueCount}/${ASSEMBLY_REQUEUE_CEILING} for content_plan_id=${row.content_plan_id}...`);
+          try {
+            const payload = JSON.parse(row.assembly_payload);
+            const requeueRes = await fetch(`${RENDER_ASSEMBLER_URL}/assemble-frames-async`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                sceneFrameUrls: payload.sceneFrameUrls,
+                sceneVideoUrls: payload.sceneVideoUrls,
+                audioUrl: payload.audioUrl,
+                outputFileName: payload.outputFileName,
+                b2KeyId: env.B2_KEY_ID,
+                b2ApplicationKey: env.B2_APPLICATION_KEY,
+                b2BucketId: env.B2_BUCKET_ID,
+              }),
+              signal: AbortSignal.timeout(30000)
+            });
+            if (requeueRes.ok) {
+              const newJob = await requeueRes.json();
+              await env.ai_ceo_memory.prepare(
+                "UPDATE videos SET assembly_job_id = ?, assembly_requeue_count = ? WHERE id = ?"
+              ).bind(newJob.jobId, newRequeueCount, row.id).run();
+              console.log(`Re-queued as job ${newJob.jobId} for content_plan_id=${row.content_plan_id}`);
+            } else {
+              const errText = await requeueRes.text().catch(() => "");
+              console.log(`Re-queue HTTP error for content_plan_id=${row.content_plan_id}: ${requeueRes.status} ${errText.slice(0, 200)}`);
+            }
+          } catch (requeueErr) {
+            console.log(`Non-fatal: re-queue attempt failed for content_plan_id=${row.content_plan_id}: ${requeueErr.message}`);
+          }
+        }
+        continue;
+      }
+
+      if (!statusRes.ok) {
+        console.log(`Non-fatal: job-status HTTP ${statusRes.status} for video id=${row.id} (content_plan_id=${row.content_plan_id})`);
+        continue;
+      }
+
+      const jobStatus = await statusRes.json();
+
+      if (jobStatus.status === "done") {
+        const payload = JSON.parse(row.assembly_payload);
+        const b2FileIds = JSON.stringify({
+          video: { fileId: jobStatus.result.fileId, fileName: payload.outputFileName },
+          thumbnail: { fileId: payload.thumbnailFileId, fileName: payload.thumbnailFileName },
+          audio: { fileId: payload.audioFileId, fileName: payload.audioFileName }
+        });
+        await env.ai_ceo_memory.prepare(
+          "UPDATE videos SET status = 'video_ready', b2_file_ids = ?, target_publish_hour = ?, assembly_job_id = NULL, assembly_payload = NULL WHERE id = ?"
+        ).bind(b2FileIds, payload.targetHour, row.id).run();
+        console.log(`Assembly complete for content_plan_id=${row.content_plan_id}: video_ready (fileId: ${jobStatus.result.fileId})`);
+      } else if (jobStatus.status === "failed") {
+        // Real assembler-side failure — count against failed_attempts and remove the row so the plan retries from scratch.
+        console.log(`Assembly job failed for content_plan_id=${row.content_plan_id}: ${jobStatus.error}`);
+        await env.ai_ceo_memory.prepare("DELETE FROM videos WHERE id = ?").bind(row.id).run();
+        await env.ai_ceo_memory.prepare("UPDATE content_plans SET failed_attempts = failed_attempts + 1 WHERE id = ?").bind(row.content_plan_id).run();
+        try {
+          await env.ai_ceo_memory.prepare("INSERT INTO system_alerts (alert_type, message) VALUES (?, ?)")
+            .bind("ASSET_GENERATION_FAILED", `content_plan_id=${row.content_plan_id}: Async assembly failed: ${(jobStatus.error || "unknown").slice(0, 400)}`).run();
+        } catch {}
+      }
+      // status === "processing": still running, poll again next tick.
+    } catch (rowErr) {
+      console.log(`Non-fatal: error processing assembly poll for video id=${row.id}: ${rowErr.message}`);
+    }
+  }
+}
 const TOPIC_ANCHOR_HASHTAGS = [
   { match: ["spiderman", "spidey", "marvel", "avengers", "x-men", "dc", "batman", "superman"], tags: ["#marvel", "#superhero"] },
   { match: ["gta", "grand theft auto", "playstation", "xbox", "nintendo", "ps5", "videogame", "video game"], tags: ["#gaming", "#videogames"] },
@@ -2876,6 +2989,15 @@ export default {
 
   async scheduled(event, env, ctx) {
     try {
+      // Schema migrations — idempotent (ALTER TABLE fails silently if column already exists).
+      try { await env.ai_ceo_memory.prepare("ALTER TABLE videos ADD COLUMN assembly_job_id TEXT").run(); } catch {}
+      try { await env.ai_ceo_memory.prepare("ALTER TABLE videos ADD COLUMN assembly_requeue_count INTEGER DEFAULT 0").run(); } catch {}
+      try { await env.ai_ceo_memory.prepare("ALTER TABLE videos ADD COLUMN assembly_payload TEXT").run(); } catch {}
+
+      // Poll any in-progress async assembly jobs before doing anything else,
+      // so a job that finished since last tick gets picked up for publishing this tick.
+      await pollAssemblingVideos(env);
+
       let sharedAccessToken = null;
       let sharedChannelId = null;
       try {
@@ -3521,47 +3643,70 @@ export default {
           const audioDownloadUrl = `${downloadUrlBase}/file/ai-ceo-media/${audioFileName}?Authorization=${authToken}`;
           const finalVideoFileName = `videos/content_plan_${contentPlanId}.mp4`;
 
-          console.log(`Calling Render to assemble video from frame sequences for content_plan_id=${contentPlanId}...`);
-          const assembleResult = await callRenderAssembler({
-            sceneFrameUrls: sceneFrameUrls,
-            sceneVideoUrls: sceneVideoUrls,
-            audioUrl: audioDownloadUrl,
-            b2KeyId: env.B2_KEY_ID,
-            b2ApplicationKey: env.B2_APPLICATION_KEY,
-            b2BucketId: env.B2_BUCKET_ID,
-            outputFileName: finalVideoFileName
-          });
-
-          const b2FileIds = JSON.stringify({
-            video: { fileId: assembleResult.fileId, fileName: finalVideoFileName },
-            thumbnail: { fileId: thumbUploadResult.fileId, fileName: thumbnailFileName },
-            audio: { fileId: audioUploadResult.fileId, fileName: audioFileName }
-          });
-
           const oppAgeHours = opp.created_at ? (Date.now() - new Date(opp.created_at + "Z").getTime()) / (1000 * 60 * 60) : 999;
           const isFreshTrend = oppAgeHours <= 3;
           const targetHour = isFreshTrend ? null : await getNextRotationHour(env);
 
-const scriptWords = generatedScript.trim().split(/\s+/).filter(w => w.length > 0);
+          const scriptWords = generatedScript.trim().split(/\s+/).filter(w => w.length > 0);
           const uniqueWords = new Set(scriptWords.map(w => w.toLowerCase()));
           const MIN_SCRIPT_WORDS = 20;
           const MIN_UNIQUE_RATIO = 0.4;
           const uniqueRatio = scriptWords.length > 0 ? uniqueWords.size / scriptWords.length : 0;
 
           if (scriptWords.length < MIN_SCRIPT_WORDS || uniqueRatio < MIN_UNIQUE_RATIO) {
-            console.log(`LOUD LOG: Economics Filter rejected content_plan_id=${contentPlanId}: script too short or repetitive (${scriptWords.length} words, ${(uniqueRatio * 100).toFixed(0)}% unique). Marking as rejected_quality instead of video_ready.`);
+            console.log(`LOUD LOG: Economics Filter rejected content_plan_id=${contentPlanId}: script too short or repetitive (${scriptWords.length} words, ${(uniqueRatio * 100).toFixed(0)}% unique). Marking as rejected_quality.`);
+            const b2FileIdsRejected = JSON.stringify({
+              thumbnail: { fileId: thumbUploadResult.fileId, fileName: thumbnailFileName },
+              audio: { fileId: audioUploadResult.fileId, fileName: audioFileName }
+            });
             await env.ai_ceo_memory.prepare(
               "INSERT INTO videos (content_plan_id, status, thumbnail_url, video_file_name, b2_file_ids, target_publish_hour) VALUES (?, ?, ?, ?, ?, ?)"
-            ).bind(contentPlanId, "rejected_quality", thumbnailDownloadUrl, finalVideoFileName, b2FileIds, targetHour).run();
+            ).bind(contentPlanId, "rejected_quality", thumbnailDownloadUrl, finalVideoFileName, b2FileIdsRejected, targetHour).run();
             continue;
           }
 
-          await env.ai_ceo_memory.prepare(
-            "INSERT INTO videos (content_plan_id, status, thumbnail_url, video_file_name, b2_file_ids, target_publish_hour) VALUES (?, ?, ?, ?, ?, ?)"
-          ).bind(contentPlanId, "video_ready", thumbnailDownloadUrl, finalVideoFileName, b2FileIds, targetHour).run();
+          // Store everything the poll handler needs to continue after assembly completes.
+          const assemblePayload = JSON.stringify({
+            sceneFrameUrls,
+            sceneVideoUrls,
+            audioUrl: audioDownloadUrl,
+            outputFileName: finalVideoFileName,
+            thumbnailFileId: thumbUploadResult.fileId,
+            thumbnailFileName,
+            audioFileId: audioUploadResult.fileId,
+            audioFileName,
+            targetHour,
+            thumbnailDownloadUrl
+          });
 
-          console.log(`Video for content_plan_id=${contentPlanId} is ${isFreshTrend ? "fresh (publishing immediately)" : `not fresh, targeting hour ${targetHour} for rotation`}`);
-          console.log(`Video fully assembled for content_plan_id=${contentPlanId}: ${finalVideoFileName} (fileId: ${assembleResult.fileId})`);
+          console.log(`Kicking off async assembly for content_plan_id=${contentPlanId}...`);
+          const asyncKickoffRes = await fetch(`${RENDER_ASSEMBLER_URL}/assemble-frames-async`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              sceneFrameUrls,
+              sceneVideoUrls,
+              audioUrl: audioDownloadUrl,
+              b2KeyId: env.B2_KEY_ID,
+              b2ApplicationKey: env.B2_APPLICATION_KEY,
+              b2BucketId: env.B2_BUCKET_ID,
+              outputFileName: finalVideoFileName
+            }),
+            signal: AbortSignal.timeout(30000)
+          });
+
+          if (!asyncKickoffRes.ok) {
+            const errText = await asyncKickoffRes.text().catch(() => "");
+            throw new Error(`Async assembly kickoff failed: ${asyncKickoffRes.status} ${errText.slice(0, 200)}`);
+          }
+
+          const asyncKickoffData = await asyncKickoffRes.json();
+
+          await env.ai_ceo_memory.prepare(
+            "INSERT INTO videos (content_plan_id, status, thumbnail_url, video_file_name, assembly_job_id, assembly_requeue_count, assembly_payload, target_publish_hour) VALUES (?, 'assembling', ?, ?, ?, 0, ?, ?)"
+          ).bind(contentPlanId, thumbnailDownloadUrl, finalVideoFileName, asyncKickoffData.jobId, assemblePayload, targetHour).run();
+
+          console.log(`Async assembly job ${asyncKickoffData.jobId} started for content_plan_id=${contentPlanId}. Poll next tick.`);
         } catch (videoErr) {
           console.log(`ERROR generating/uploading video assets for content_plan_id=${contentPlanId}:`, videoErr.message);
           if (isInfraFailure(videoErr.message)) {
