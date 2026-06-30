@@ -2634,7 +2634,8 @@ export default {
       // muted) and returns sendEmail's raw result so you know definitively
       // whether the email channel works, rather than guessing from logs.
       const { sendEmail } = await import("./notifications.js");
-      const result = await sendEmail(env, "Test notification", `This is a manual test notification sent at ${new Date().toISOString()} to confirm the email channel works end-to-end.`);
+      const dashboardLink = "https://ai-ceo-orchestrator.jacklabs.workers.dev/dashboard";
+      const result = await sendEmail(env, "Test notification", `This is a manual test notification sent at ${new Date().toISOString()} to confirm the email channel works end-to-end.\n\nView on dashboard: ${dashboardLink}`);
       return new Response(JSON.stringify(result), {
         status: result.sent ? 200 : 502,
         headers: { "Content-Type": "application/json" }
