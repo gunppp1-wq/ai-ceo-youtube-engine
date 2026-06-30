@@ -2741,6 +2741,19 @@ export default {
       return new Response(JSON.stringify({ ok: true, enabled: enabled === 1 }), { headers: { "Content-Type": "application/json" } });
     }
 
+    if (url.pathname === "/self-mod/api/test-notification" && request.method === "POST") {
+      // Manual end-to-end check: bypasses notification_settings.enabled (a
+      // test should always attempt to send, even if notifications are
+      // muted) and returns sendEmail's raw result so you know definitively
+      // whether the email channel works, rather than guessing from logs.
+      const { sendEmail } = await import("./notifications.js");
+      const result = await sendEmail(env, "Test notification", `This is a manual test notification sent at ${new Date().toISOString()} to confirm the email channel works end-to-end.`);
+      return new Response(JSON.stringify(result), {
+        status: result.sent ? 200 : 502,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
 
     if (url.pathname === "/authorize") {
       const scopes = [
