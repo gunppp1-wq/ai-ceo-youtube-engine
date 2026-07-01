@@ -1507,10 +1507,14 @@ async function pollAssemblingVideos(env) {
           thumbnail: { fileId: payload.thumbnailFileId, fileName: payload.thumbnailFileName },
           audio: { fileId: payload.audioFileId, fileName: payload.audioFileName }
         });
+        // If the target publish hour already passed, use NULL so the publish loop picks it up immediately
+        // rather than waiting until the same hour rolls around the next day.
+        const nowHour = new Date().getUTCHours();
+        const resolvedPublishHour = (payload.targetHour != null && payload.targetHour <= nowHour) ? null : payload.targetHour;
         await env.ai_ceo_memory.prepare(
           "UPDATE videos SET status = 'video_ready', b2_file_ids = ?, target_publish_hour = ?, assembly_job_id = NULL, assembly_payload = NULL WHERE id = ?"
-        ).bind(b2FileIds, payload.targetHour, row.id).run();
-        console.log(`Assembly complete for content_plan_id=${row.content_plan_id}: video_ready (fileId: ${jobStatus.result.fileId})`);
+        ).bind(b2FileIds, resolvedPublishHour, row.id).run();
+        console.log(`Assembly complete for content_plan_id=${row.content_plan_id}: video_ready (fileId: ${jobStatus.result.fileId}, publish_hour=${resolvedPublishHour ?? 'immediate'})`);
       } else if (jobStatus.status === "failed") {
         // Real assembler-side failure — count against failed_attempts and remove the row so the plan retries from scratch.
         console.log(`Assembly job failed for content_plan_id=${row.content_plan_id}: ${jobStatus.error}`);
@@ -3003,10 +3007,11 @@ export default {
 
   async scheduled(event, env, ctx) {
     try {
-      // Schema migrations — idempotent (ALTER TABLE fails silently if column already exists).
+      // Schema migrations — idempotent (ALTER TABLE fails silently if column already exists; CREATE TABLE IF NOT EXISTS is inherently idempotent).
       try { await env.ai_ceo_memory.prepare("ALTER TABLE videos ADD COLUMN assembly_job_id TEXT").run(); } catch {}
       try { await env.ai_ceo_memory.prepare("ALTER TABLE videos ADD COLUMN assembly_requeue_count INTEGER DEFAULT 0").run(); } catch {}
       try { await env.ai_ceo_memory.prepare("ALTER TABLE videos ADD COLUMN assembly_payload TEXT").run(); } catch {}
+      try { await env.ai_ceo_memory.prepare("CREATE TABLE IF NOT EXISTS production_halt (id INTEGER PRIMARY KEY AUTOINCREMENT, reason TEXT NOT NULL, halted_at TEXT DEFAULT (datetime('now')), resumed_at TEXT, triggered_by TEXT)").run(); } catch {}
 
       // Poll any in-progress async assembly jobs before doing anything else,
       // so a job that finished since last tick gets picked up for publishing this tick.
@@ -3699,7 +3704,7 @@ export default {
               b2BucketId: env.B2_BUCKET_ID,
               outputFileName: finalVideoFileName
             }),
-            signal: AbortSignal.timeout(30000)
+            signal: AbortSignal.timeout(75000)
           });
 
           if (!asyncKickoffRes.ok) {
