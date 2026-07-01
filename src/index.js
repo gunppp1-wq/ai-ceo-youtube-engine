@@ -1515,9 +1515,14 @@ async function collectCompetitorInsights(env, query) {
     } catch (thumbErr) {
       const isLicenseIssue = thumbErr.message && thumbErr.message.toLowerCase().includes("agree");
       if (isLicenseIssue) {
-        await env.ai_ceo_memory.prepare(
-          "INSERT INTO system_alerts (alert_type, message) VALUES (?, ?)"
-        ).bind("VISION_MODEL_LICENSE_NEEDED", "The vision model (@cf/meta/llama-3.2-11b-vision-instruct) requires one-time license agreement. Send a request with {\"prompt\": \"agree\"} to this model via the Cloudflare dashboard or API to enable it.").run();
+        const recentLicenseAlert = await env.ai_ceo_memory.prepare(
+          "SELECT id FROM system_alerts WHERE alert_type = 'VISION_MODEL_LICENSE_NEEDED' AND created_at > datetime('now', '-1 hour') LIMIT 1"
+        ).first().catch(() => null);
+        if (!recentLicenseAlert) {
+          await env.ai_ceo_memory.prepare(
+            "INSERT INTO system_alerts (alert_type, message) VALUES (?, ?)"
+          ).bind("VISION_MODEL_LICENSE_NEEDED", "The vision model (@cf/meta/llama-3.2-11b-vision-instruct) requires one-time license agreement. Send a request with {\"prompt\": \"agree\"} to this model via the Cloudflare dashboard or API to enable it.").run();
+        }
       }
       console.log(`Non-fatal: thumbnail analysis failed for "${top.title}":`, thumbErr.message);
     }
