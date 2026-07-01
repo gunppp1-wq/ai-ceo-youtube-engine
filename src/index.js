@@ -92,37 +92,10 @@ async function callRenderAssembler(payload) {
 }
 
 async function generateSpeechViaPiper(env, text) {
-  const renderUrl = "https://ai-ceo-video-assembler.onrender.com";
-  try {
-    const healthRes = await fetch(`${renderUrl}/generate-speech/health`, {
-      signal: AbortSignal.timeout(20000)
-    });
-    if (!healthRes.ok) {
-      console.log("[piper] health check failed, falling back to Aura-2");
-      return null;
-    }
-    const health = await healthRes.json();
-    if (!health.ready) {
-      console.log("[piper] piper reports not ready, falling back to Aura-2");
-      return null;
-    }
-    const genRes = await fetch(`${renderUrl}/generate-speech`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
-      signal: AbortSignal.timeout(60000)
-    });
-    if (!genRes.ok) {
-      const detail = await genRes.text().catch(() => "");
-      console.log(`[piper] generation failed (status ${genRes.status}): ${detail}`);
-      return null;
-    }
-    const audioArrayBuffer = await genRes.arrayBuffer();
-    return new Uint8Array(audioArrayBuffer);
-  } catch (err) {
-    console.log("[piper] unexpected error, falling back to Aura-2:", err.message);
-    return null;
-  }
+  // Piper is disabled server-side and always returns ready:false.
+  // Returning null immediately saves the health-check subrequest; Aura-2 is the active TTS path.
+  // Re-enable by restoring the fetch-based health check when Piper is reactivated.
+  return null;
 }
 async function getYoutubeAccessToken(env) {
   let refreshToken = env.YOUTUBE_REFRESH_TOKEN;
@@ -965,9 +938,9 @@ async function selectHookVariant(env) {
   return leastUsed;
 }
 
-async function getMusicTrackUrl(env) {
+async function getMusicTrackUrl(env, sharedAuthData = null) {
   try {
-    const authData = await b2Authorize(env);
+    const authData = sharedAuthData || await b2Authorize(env);
     const apiUrl = authData.apiInfo.storageApi.apiUrl;
     const authToken = authData.authorizationToken;
     const downloadBase = authData.apiInfo.storageApi.downloadUrl;
@@ -1503,7 +1476,9 @@ async function collectCompetitorInsights(env, query) {
     ).bind(query, insight.title, insight.viewCount, insight.channelTitle).run();
   }
 
-  const topByViews = [...insights].sort((a, b) => b.viewCount - a.viewCount).slice(0, 3);
+  // Analyze only the single top video per query (was 3). Each thumbnail analysis costs
+  // 1 fetch (image download). Reducing 3→1 saves 2 subrequests per query × 3 queries = 6/day.
+  const topByViews = [...insights].sort((a, b) => b.viewCount - a.viewCount).slice(0, 1);
   for (const top of topByViews) {
     if (!top.thumbnailUrl) continue;
     try {
@@ -3720,30 +3695,12 @@ export default {
             continue;
           }
 
-          // Single health check only — Piper is currently disabled server-side
-          // (always returns ready:false). Multiple retries waste subrequests and
-          // 60+ seconds of wall-clock time on the free plan's 50-subrequest budget.
-          let piperIsAvailable = false;
-          try {
-            const piperHealthRes = await fetch("https://ai-ceo-video-assembler.onrender.com/generate-speech/health", { signal: AbortSignal.timeout(20000) });
-            if (piperHealthRes.ok) {
-              const piperHealth = await piperHealthRes.json();
-              piperIsAvailable = piperHealth.ready === true;
-            }
-          } catch (piperHealthErr) {
-            console.log(`Non-fatal: piper health check failed:`, piperHealthErr.message);
-          }
-          if (!piperIsAvailable) {
-            console.log("Piper not ready, falling back to Aura-2 for this video.");
-          }
-          if (!piperIsAvailable) {
-            const canProceedNeuronBudget = await checkNeuronBudget(env, "tts");
-            if (!canProceedNeuronBudget) {
-              console.log(`Skipping asset generation for content_plan_id=${contentPlanId}: estimated neuron budget exhausted for today (piper unavailable, would need Aura-2)`);
-              continue;
-            }
-          } else {
-            console.log(`Piper available for content_plan_id=${contentPlanId}, skipping Cloudflare neuron-budget reservation for TTS`);
+          // Piper is disabled server-side; generateSpeechViaPiper() returns null immediately.
+          // Aura-2 is always used. Neuron budget must be available.
+          const canProceedNeuronBudget = await checkNeuronBudget(env, "tts");
+          if (!canProceedNeuronBudget) {
+            console.log(`Skipping asset generation for content_plan_id=${contentPlanId}: estimated neuron budget exhausted for today.`);
+            continue;
           }
 
           let audioBytes = await generateSpeechViaPiper(env, generatedScript);
@@ -3797,36 +3754,17 @@ export default {
           const sceneVideoUrls = [];
           let sharedUploadUrlData = await b2GetUploadUrl(apiUrl, authToken, env.B2_BUCKET_ID);
           try {
+            // SUBREQUEST BUDGET: 3 frames per scene (was 6). Each frame is 1 B2 upload subrequest.
+            // Pexels scene search removed (was 2 subrequests/scene × 3 scenes = 6 saved).
+            // AI image generation (flux) is used instead — AI calls don't count toward the
+            // 50-subrequest fetch() limit so they're free from a ceiling perspective.
+            const FRAMES_PER_SCENE = 3;
             for (let sceneIdx = 0; sceneIdx < sceneDescriptions.length; sceneIdx++) {
               const motionType = MOTION_TYPES[(contentPlanId + sceneIdx) % MOTION_TYPES.length];
 
               let frames;
-              let pexelsResult = null;
-              if (env.PEXELS_API_KEY) {
-                try {
-                  pexelsResult = await searchPexelsVideo(env.PEXELS_API_KEY, sceneDescriptions[sceneIdx].label);
-                } catch (pexelsErr) {
-                  console.log(`Non-fatal: Pexels search failed for scene ${sceneIdx}:`, pexelsErr.message);
-                }
-              }
-
-              if (pexelsResult) {
-                try {
-                  const pexelsImageBase64 = await fetchImageAsBase64(pexelsResult.previewImageUrl);
-                  frames = await captureImageSceneFrames(page, {
-                    imageBase64: pexelsImageBase64,
-                    motionType: motionType,
-                    labelText: sceneDescriptions[sceneIdx].label
-                  }, 6, 150);
-                  console.log(`Scene ${sceneIdx} using Pexels photo by ${pexelsResult.photographer}`);
-                } catch (pexelsImgErr) {
-                  console.log(`Non-fatal: Pexels image processing failed for scene ${sceneIdx}, trying AI generation:`, pexelsImgErr.message);
-                  pexelsResult = null;
-                }
-              }
-
-              const canProceedSceneImage = !pexelsResult && await checkNeuronBudget(env, "image_generation");
-              if (!pexelsResult && canProceedSceneImage) {
+              const canProceedSceneImage = await checkNeuronBudget(env, "image_generation");
+              if (canProceedSceneImage) {
                 try {
                   const sceneImagePrompt = `${sceneDescriptions[sceneIdx].label}, cinematic, dramatic lighting, vibrant colors, professional illustration, no text, no logos`;
                   const sceneImageResp = await env.AI.run("@cf/black-forest-labs/flux-1-schnell", { prompt: sceneImagePrompt });
@@ -3836,7 +3774,7 @@ export default {
                     imageBase64: sceneImageBase64,
                     motionType: motionType,
                     labelText: sceneDescriptions[sceneIdx].label
-                  }, 6, 150);
+                  }, FRAMES_PER_SCENE, 150);
                 } catch (sceneImgErr) {
                   console.log(`Non-fatal: scene image generation failed for scene ${sceneIdx}, falling back to gradient:`, sceneImgErr.message);
                   const colorPair = COLOR_PAIRS[(contentPlanId + sceneIdx) % COLOR_PAIRS.length];
@@ -3846,10 +3784,10 @@ export default {
                     secondaryColor: colorPair[1],
                     motionType: motionType,
                     labelText: sceneDescriptions[sceneIdx].label
-                  }, 6, 150);
+                  }, FRAMES_PER_SCENE, 150);
                 }
-              } else if (!frames) {
-                console.log(`No Pexels match and neuron budget exhausted, using gradient fallback for scene ${sceneIdx}`);
+              } else {
+                console.log(`Neuron budget exhausted, using gradient fallback for scene ${sceneIdx}`);
                 const colorPair = COLOR_PAIRS[(contentPlanId + sceneIdx) % COLOR_PAIRS.length];
                 frames = await captureSceneFrames(page, {
                   emoji: sceneDescriptions[sceneIdx].emoji,
@@ -3857,7 +3795,7 @@ export default {
                   secondaryColor: colorPair[1],
                   motionType: motionType,
                   labelText: sceneDescriptions[sceneIdx].label
-                }, 6, 150);
+                }, FRAMES_PER_SCENE, 150);
               }
 
               const frameUrls = [];
@@ -3873,7 +3811,7 @@ export default {
                 frameUrls.push(`${downloadUrlBase}/file/ai-ceo-media/${frameFileName}?Authorization=${authToken}`);
               }
               sceneFrameUrls.push(frameUrls);
-              sceneVideoUrls.push(pexelsResult && pexelsResult.videoUrl ? pexelsResult.videoUrl : null);
+              sceneVideoUrls.push(null);
             }
           } finally {
             await browser.close();
@@ -3960,7 +3898,7 @@ export default {
             continue;
           }
 
-          const musicUrl = await getMusicTrackUrl(env);
+          const musicUrl = await getMusicTrackUrl(env, authData);
           if (musicUrl) console.log(`Music track selected for content_plan_id=${contentPlanId}`);
 
           // Store everything the poll handler needs to continue after assembly completes.
