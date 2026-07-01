@@ -1409,7 +1409,7 @@ async function markHourUsed(env, hour) {
   ).bind(hour).run();
 }
 
-const INFRA_FAILURE_PATTERNS = [/524/, /502/, /503/, /ETIMEDOUT/i, /ECONNRESET/i, /ECONNREFUSED/i, /fetch failed/i, /network/i, /timeout/i, /timed out/i];
+const INFRA_FAILURE_PATTERNS = [/524/, /502/, /503/, /ETIMEDOUT/i, /ECONNRESET/i, /ECONNREFUSED/i, /fetch failed/i, /network/i, /timeout/i, /timed out/i, /subrequest/i];
 function isInfraFailure(errMessage) {
   const msg = errMessage || "";
   return INFRA_FAILURE_PATTERNS.some(pattern => pattern.test(msg));
@@ -3432,29 +3432,21 @@ export default {
             continue;
           }
 
+          // Single health check only — Piper is currently disabled server-side
+          // (always returns ready:false). Multiple retries waste subrequests and
+          // 60+ seconds of wall-clock time on the free plan's 50-subrequest budget.
           let piperIsAvailable = false;
-          const PIPER_HEALTH_RETRY_ATTEMPTS = 6;
-          const PIPER_HEALTH_RETRY_DELAY_MS = 12000;
-          for (let attempt = 1; attempt <= PIPER_HEALTH_RETRY_ATTEMPTS; attempt++) {
-            try {
-              const piperHealthRes = await fetch("https://ai-ceo-video-assembler.onrender.com/generate-speech/health", { signal: AbortSignal.timeout(20000) });
-              if (piperHealthRes.ok) {
-                const piperHealth = await piperHealthRes.json();
-                if (piperHealth.ready) {
-                  piperIsAvailable = true;
-                  break;
-                }
-                console.log(`Piper health check attempt ${attempt}/${PIPER_HEALTH_RETRY_ATTEMPTS}: not ready yet (likely cold-starting).`);
-              }
-            } catch (piperHealthErr) {
-              console.log(`Non-fatal: piper health check attempt ${attempt}/${PIPER_HEALTH_RETRY_ATTEMPTS} failed:`, piperHealthErr.message);
+          try {
+            const piperHealthRes = await fetch("https://ai-ceo-video-assembler.onrender.com/generate-speech/health", { signal: AbortSignal.timeout(20000) });
+            if (piperHealthRes.ok) {
+              const piperHealth = await piperHealthRes.json();
+              piperIsAvailable = piperHealth.ready === true;
             }
-            if (attempt < PIPER_HEALTH_RETRY_ATTEMPTS) {
-              await new Promise(resolve => setTimeout(resolve, PIPER_HEALTH_RETRY_DELAY_MS));
-            }
+          } catch (piperHealthErr) {
+            console.log(`Non-fatal: piper health check failed:`, piperHealthErr.message);
           }
           if (!piperIsAvailable) {
-            console.log("Piper still not ready after retries, falling back to Aura-2 for this video.");
+            console.log("Piper not ready, falling back to Aura-2 for this video.");
           }
           if (!piperIsAvailable) {
             const canProceedNeuronBudget = await checkNeuronBudget(env, "tts");
