@@ -160,7 +160,11 @@ async function getYoutubeAccessToken(env) {
   return data.access_token;
 }
 
-async function uploadVideoToYoutube(accessToken, videoBytes, title, description, categoryId = "24", tags = []) {
+async function uploadVideoToYoutube(accessToken, videoBytes, title, description, categoryId = "24", tags = [], publishAt = null) {
+  const statusBlock = publishAt
+    ? { privacyStatus: "private", publishAt: publishAt, selfDeclaredMadeForKids: false }
+    : { privacyStatus: "public", selfDeclaredMadeForKids: false };
+
   const metadata = {
     snippet: {
       title: title.slice(0, 100),
@@ -168,10 +172,7 @@ async function uploadVideoToYoutube(accessToken, videoBytes, title, description,
       categoryId: categoryId,
       tags: tags.slice(0, 15)
     },
-    status: {
-      privacyStatus: "public",
-      selfDeclaredMadeForKids: false
-    }
+    status: statusBlock
   };
 
   const initRes = await fetch("https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status", {
@@ -496,6 +497,67 @@ async function probeVideoDuration(env, fileName, fileId) {
   return data.durationSeconds;
 }
 
+async function autoDiscoverAnalyzerInputs(env) {
+  if (!env.ANALYZER_B2_KEY_ID || !env.ANALYZER_B2_APPLICATION_KEY || !env.ANALYZER_B2_BUCKET_ID) return;
+  try {
+    // Gate to once per day — listing all B2 files is a billable operation.
+    const lastRun = await env.ai_ceo_memory.prepare(
+      "SELECT last_run_at FROM scheduler_state WHERE task_name = 'analyzer_auto_discovery'"
+    ).first();
+    if (lastRun && lastRun.last_run_at) {
+      const hoursSince = (Date.now() - new Date(lastRun.last_run_at).getTime()) / (1000 * 60 * 60);
+      if (hoursSince < 23) return;
+    }
+
+    const authData = await b2Authorize(env, env.ANALYZER_B2_KEY_ID, env.ANALYZER_B2_APPLICATION_KEY);
+    const apiUrl = authData.apiInfo.storageApi.apiUrl;
+    const authToken = authData.authorizationToken;
+
+    // Page through all files in the bucket (max 1000 per call).
+    const allFiles = [];
+    let startFileName = undefined;
+    do {
+      const params = `bucketId=${env.ANALYZER_B2_BUCKET_ID}&maxFileCount=1000${startFileName ? `&startFileName=${encodeURIComponent(startFileName)}` : ""}`;
+      const listRes = await fetch(`${apiUrl}/b2api/v3/b2_list_file_names?${params}`, {
+        headers: { Authorization: authToken }
+      });
+      if (!listRes.ok) break;
+      const listData = await listRes.json();
+      allFiles.push(...(listData.files || []));
+      startFileName = listData.nextFileName || null;
+    } while (startFileName);
+
+    if (allFiles.length === 0) {
+      console.log("analyzer auto-discovery: no files found in bucket.");
+    } else {
+      // Get existing file_ids and file_names to avoid duplicates.
+      const existing = await env.ai_ceo_memory.prepare(
+        "SELECT b2_file_name, b2_file_id FROM analyzer_inputs"
+      ).all();
+      const existingNames = new Set(existing.results.map(r => r.b2_file_name).filter(Boolean));
+      const existingIds = new Set(existing.results.map(r => r.b2_file_id).filter(Boolean));
+
+      let registered = 0;
+      for (const file of allFiles) {
+        if (existingNames.has(file.fileName) || existingIds.has(file.fileId)) continue;
+        // Only auto-register video files.
+        if (!file.contentType || !file.contentType.startsWith("video/")) continue;
+        await env.ai_ceo_memory.prepare(
+          "INSERT INTO analyzer_inputs (b2_file_name, b2_file_id, status, mode) VALUES (?, ?, 'uploaded', 'analyze')"
+        ).bind(file.fileName, file.fileId).run();
+        registered++;
+      }
+      console.log(`analyzer auto-discovery: found ${allFiles.length} file(s) in bucket, registered ${registered} new.`);
+    }
+
+    await env.ai_ceo_memory.prepare(
+      "INSERT INTO scheduler_state (task_name, last_run_at) VALUES ('analyzer_auto_discovery', ?) ON CONFLICT(task_name) DO UPDATE SET last_run_at = excluded.last_run_at"
+    ).bind(new Date().toISOString()).run();
+  } catch (err) {
+    console.log("Non-fatal: analyzer auto-discovery failed:", err.message);
+  }
+}
+
 async function getAnalyzerDownloadUrl(env, fileName) {
   const authData = await b2Authorize(env, env.ANALYZER_B2_KEY_ID, env.ANALYZER_B2_APPLICATION_KEY);
   const downloadUrlBase = authData.apiInfo.storageApi.downloadUrl;
@@ -774,6 +836,16 @@ Respond with EXACTLY one line: MATCH: <option id> or MATCH: NONE if no instructi
 }
 
 async function selectTitleVariant(env) {
+  try {
+    const declared = await env.ai_ceo_memory.prepare(
+      "SELECT chosen_value FROM reasoning_history WHERE decision_type = 'variant_winner_title_style' ORDER BY id DESC LIMIT 1"
+    ).first();
+    if (declared) {
+      const v = TITLE_STYLE_VARIANTS.find(x => x.id === declared.chosen_value);
+      if (v) { console.log(`Title variant: using declared winner "${v.id}" from reasoning_history`); return v; }
+    }
+  } catch {}
+
   const MIN_SAMPLE_SIZE = 5;
   const performanceRows = await env.ai_ceo_memory.prepare(`
     SELECT pv.variant_text,
@@ -829,6 +901,16 @@ async function selectTitleVariant(env) {
 }
 
 async function selectHookVariant(env) {
+  try {
+    const declared = await env.ai_ceo_memory.prepare(
+      "SELECT chosen_value FROM reasoning_history WHERE decision_type = 'variant_winner_hook_intensity' ORDER BY id DESC LIMIT 1"
+    ).first();
+    if (declared) {
+      const v = HOOK_INTENSITY_VARIANTS.find(x => x.id === declared.chosen_value);
+      if (v) { console.log(`Hook variant: using declared winner "${v.id}" from reasoning_history`); return v; }
+    }
+  } catch {}
+
   const MIN_SAMPLE_SIZE = 5;
   const performanceRows = await env.ai_ceo_memory.prepare(`
     SELECT pv.variant_text,
@@ -881,6 +963,138 @@ async function selectHookVariant(env) {
   }
 
   return leastUsed;
+}
+
+async function getMusicTrackUrl(env) {
+  try {
+    const authData = await b2Authorize(env);
+    const apiUrl = authData.apiInfo.storageApi.apiUrl;
+    const authToken = authData.authorizationToken;
+    const downloadBase = authData.apiInfo.storageApi.downloadUrl;
+    const listRes = await fetch(`${apiUrl}/b2api/v3/b2_list_file_names?bucketId=${env.B2_BUCKET_ID}&prefix=music%2F&maxFileCount=100`, {
+      headers: { Authorization: authToken }
+    });
+    if (!listRes.ok) return null;
+    const listData = await listRes.json();
+    const tracks = (listData.files || []).filter(f => f.fileName !== "music/" && f.contentType && f.contentType.startsWith("audio/"));
+    if (tracks.length === 0) return null;
+    const track = tracks[Math.floor(Math.random() * tracks.length)];
+    return `${downloadBase}/file/ai-ceo-media/${track.fileName}?Authorization=${authToken}`;
+  } catch (err) {
+    console.log("Non-fatal: getMusicTrackUrl failed:", err.message);
+    return null;
+  }
+}
+
+async function checkAndInsertDrawdownHalt(env) {
+  try {
+    const alreadyHalted = await env.ai_ceo_memory.prepare(
+      "SELECT id FROM production_halt WHERE resumed_at IS NULL LIMIT 1"
+    ).first();
+    if (alreadyHalted) return; // already halted, don't create a duplicate
+
+    const recent = await env.ai_ceo_memory.prepare(`
+      SELECT v.id, v.published_at, COALESCE(vp.views, 0) as views
+      FROM videos v
+      LEFT JOIN video_performance vp ON vp.video_id = v.id
+      WHERE v.status = 'published' AND v.published_at < datetime('now', '-24 hours')
+      ORDER BY v.published_at DESC
+      LIMIT 5
+    `).all();
+
+    if (recent.results.length < 5) return; // not enough history yet
+    const allUnderperforming = recent.results.every(r => r.views < 5);
+    if (!allUnderperforming) return;
+
+    const reason = `Drawdown: last 5 published videos all have <5 views after 24h (views: ${recent.results.map(r => r.views).join(", ")})`;
+    await env.ai_ceo_memory.prepare(
+      "INSERT INTO production_halt (reason, triggered_by) VALUES (?, ?)"
+    ).bind(reason, "drawdown_auto_halt").run();
+    console.log(`LOUD LOG: ${reason}. Production halted. POST /admin/resume-production to clear.`);
+
+    try {
+      const { sendEmail } = await import("./notifications.js");
+      await sendEmail(env, "AI CEO: Production auto-halted", `${reason}\n\nThe engine has paused content generation and publishing.\n\nTo resume: POST https://ai-ceo-orchestrator.jacklabs.workers.dev/admin/resume-production`);
+    } catch (emailErr) {
+      console.log("Non-fatal: halt notification email failed:", emailErr.message);
+    }
+  } catch (err) {
+    console.log("Non-fatal: drawdown halt check failed:", err.message);
+  }
+}
+
+const VARIANT_WINNER_LEAD = 1.25; // winner must outperform second-best by 25%+
+
+async function checkAndRecordVariantWinners(env) {
+  const MIN_SAMPLE = 5;
+
+  // Title style: winner by avg_views
+  try {
+    const rows = await env.ai_ceo_memory.prepare(`
+      SELECT pv.variant_text, COUNT(*) as sample_size, AVG(vp.views) as avg_views
+      FROM prompt_variants pv
+      JOIN videos v ON v.content_plan_id = pv.content_plan_id
+      JOIN video_performance vp ON vp.video_id = v.id
+      WHERE pv.variant_type = 'title_style'
+      GROUP BY pv.variant_text
+    `).all();
+    const scored = rows.results.filter(r => r.sample_size >= MIN_SAMPLE && r.avg_views != null);
+    if (scored.length >= 2) {
+      const sorted = [...scored].sort((a, b) => b.avg_views - a.avg_views);
+      const best = sorted[0], second = sorted[1];
+      if (best.avg_views > second.avg_views * VARIANT_WINNER_LEAD) {
+        const existing = await env.ai_ceo_memory.prepare(
+          "SELECT chosen_value FROM reasoning_history WHERE decision_type = 'variant_winner_title_style' ORDER BY id DESC LIMIT 1"
+        ).first();
+        if (!existing || existing.chosen_value !== best.variant_text) {
+          const lead = ((best.avg_views / second.avg_views - 1) * 100).toFixed(0);
+          await env.ai_ceo_memory.prepare(
+            "INSERT INTO reasoning_history (decision_type, chosen_value, reasoning) VALUES (?, ?, ?)"
+          ).bind(
+            "variant_winner_title_style", best.variant_text,
+            `Winner: "${best.variant_text}" avg_views=${best.avg_views.toFixed(1)} (n=${best.sample_size}) vs "${second.variant_text}" avg_views=${second.avg_views.toFixed(1)} (n=${second.sample_size}). Lead: ${lead}% exceeds 25% threshold.`
+          ).run();
+          console.log(`A/B winner declared — title_style: ${best.variant_text} (+${lead}% views vs runner-up)`);
+        }
+      }
+    }
+  } catch (err) {
+    console.log("Non-fatal: title_style variant winner check failed:", err.message);
+  }
+
+  // Hook intensity: winner by avg_duration
+  try {
+    const rows = await env.ai_ceo_memory.prepare(`
+      SELECT pv.variant_text, COUNT(*) as sample_size, AVG(vp.average_view_duration) as avg_duration
+      FROM prompt_variants pv
+      JOIN videos v ON v.content_plan_id = pv.content_plan_id
+      JOIN video_performance vp ON vp.video_id = v.id
+      WHERE pv.variant_type = 'hook_intensity'
+      GROUP BY pv.variant_text
+    `).all();
+    const scored = rows.results.filter(r => r.sample_size >= MIN_SAMPLE && r.avg_duration != null);
+    if (scored.length >= 2) {
+      const sorted = [...scored].sort((a, b) => b.avg_duration - a.avg_duration);
+      const best = sorted[0], second = sorted[1];
+      if (best.avg_duration > second.avg_duration * VARIANT_WINNER_LEAD) {
+        const existing = await env.ai_ceo_memory.prepare(
+          "SELECT chosen_value FROM reasoning_history WHERE decision_type = 'variant_winner_hook_intensity' ORDER BY id DESC LIMIT 1"
+        ).first();
+        if (!existing || existing.chosen_value !== best.variant_text) {
+          const lead = ((best.avg_duration / second.avg_duration - 1) * 100).toFixed(0);
+          await env.ai_ceo_memory.prepare(
+            "INSERT INTO reasoning_history (decision_type, chosen_value, reasoning) VALUES (?, ?, ?)"
+          ).bind(
+            "variant_winner_hook_intensity", best.variant_text,
+            `Winner: "${best.variant_text}" avg_duration=${best.avg_duration.toFixed(1)}s (n=${best.sample_size}) vs "${second.variant_text}" avg_duration=${second.avg_duration.toFixed(1)}s (n=${second.sample_size}). Lead: ${lead}% exceeds 25% threshold.`
+          ).run();
+          console.log(`A/B winner declared — hook_intensity: ${best.variant_text} (+${lead}% duration vs runner-up)`);
+        }
+      }
+    }
+  } catch (err) {
+    console.log("Non-fatal: hook_intensity variant winner check failed:", err.message);
+  }
 }
 
 async function reasonTopicSelection(env, candidates, recentTitles) {
@@ -1469,6 +1683,7 @@ async function pollAssemblingVideos(env) {
                 sceneFrameUrls: payload.sceneFrameUrls,
                 sceneVideoUrls: payload.sceneVideoUrls,
                 audioUrl: payload.audioUrl,
+                musicUrl: payload.musicUrl,
                 outputFileName: payload.outputFileName,
                 b2KeyId: env.B2_KEY_ID,
                 b2ApplicationKey: env.B2_APPLICATION_KEY,
@@ -2745,6 +2960,17 @@ export default {
       return new Response(JSON.stringify({ ok: true, enabled: enabled === 1 }), { headers: { "Content-Type": "application/json" } });
     }
 
+    if (url.pathname === "/admin/resume-production" && request.method === "POST") {
+      const updated = await env.ai_ceo_memory.prepare(
+        "UPDATE production_halt SET resumed_at = datetime('now') WHERE resumed_at IS NULL"
+      ).run();
+      if (updated.meta.changes === 0) {
+        return new Response(JSON.stringify({ ok: true, message: "No active halt found — production was already running." }), { headers: { "Content-Type": "application/json" } });
+      }
+      console.log("Production halt cleared via /admin/resume-production");
+      return new Response(JSON.stringify({ ok: true, message: "Production halt cleared. Content generation and publishing will resume on the next cron tick." }), { headers: { "Content-Type": "application/json" } });
+    }
+
     if (url.pathname === "/self-mod/api/test-notification" && request.method === "POST") {
       // Manual end-to-end check: bypasses notification_settings.enabled (a
       // test should always attempt to send, even if notifications are
@@ -3017,6 +3243,16 @@ export default {
       // so a job that finished since last tick gets picked up for publishing this tick.
       await pollAssemblingVideos(env);
 
+      const activeHaltRow = await env.ai_ceo_memory.prepare(
+        "SELECT id, reason, halted_at FROM production_halt WHERE resumed_at IS NULL ORDER BY id DESC LIMIT 1"
+      ).first().catch(() => null);
+      const isProductionHalted = !!activeHaltRow;
+      if (isProductionHalted) {
+        console.log(`LOUD LOG: Production halted since ${activeHaltRow.halted_at}: ${activeHaltRow.reason}. Skipping content generation and publishing. POST /admin/resume-production to clear.`);
+      }
+
+      await autoDiscoverAnalyzerInputs(env);
+
       let sharedAccessToken = null;
       let sharedChannelId = null;
       try {
@@ -3261,11 +3497,53 @@ export default {
         console.log("Non-fatal: could not fetch title pattern hint:", patternHintErr.message);
       }
 
-      const backlogCheck = await env.ai_ceo_memory.prepare(
+      // Weekly burst: on Monday UTC, if AI quota is fresh and we're not in an active burst week,
+      // raise MAX_CONTENT_BACKLOG to 7 for the week to produce a 7-video batch.
+      let maxContentBacklog = 5;
+      try {
+        const today = new Date();
+        const isMonday = today.getUTCDay() === 1;
+        if (isMonday) {
+          const burstState = await env.ai_ceo_memory.prepare(
+            "SELECT last_run_at FROM scheduler_state WHERE task_name = 'burst_week'"
+          ).first();
+          const hoursSinceBurst = burstState && burstState.last_run_at
+            ? (Date.now() - new Date(burstState.last_run_at).getTime()) / (1000 * 60 * 60)
+            : Infinity;
+          const neuronRow = await env.ai_ceo_memory.prepare(
+            "SELECT count FROM daily_usage WHERE usage_date = ? AND op_type = 'neurons_estimated'"
+          ).bind(today.toISOString().slice(0, 10)).first();
+          const neuronsUsedToday = neuronRow ? neuronRow.count : 0;
+          const quotaFresh = neuronsUsedToday < 1000; // early in the day, most quota available
+
+          if (hoursSinceBurst >= 24 * 7 && quotaFresh) {
+            maxContentBacklog = 7;
+            await env.ai_ceo_memory.prepare(
+              "INSERT INTO scheduler_state (task_name, last_run_at) VALUES ('burst_week', ?) ON CONFLICT(task_name) DO UPDATE SET last_run_at = excluded.last_run_at"
+            ).bind(new Date().toISOString()).run();
+            console.log("Weekly burst activated: MAX_CONTENT_BACKLOG raised to 7 for this week.");
+          }
+        } else {
+          // Check if we're within an active burst week (started in the last 7 days)
+          const burstState = await env.ai_ceo_memory.prepare(
+            "SELECT last_run_at FROM scheduler_state WHERE task_name = 'burst_week'"
+          ).first();
+          if (burstState && burstState.last_run_at) {
+            const hoursSinceBurst = (Date.now() - new Date(burstState.last_run_at).getTime()) / (1000 * 60 * 60);
+            if (hoursSinceBurst < 24 * 7) {
+              maxContentBacklog = 7;
+            }
+          }
+        }
+      } catch (burstErr) {
+        console.log("Non-fatal: burst week check failed:", burstErr.message);
+      }
+
+      const backlogCheck = isProductionHalted ? null : await env.ai_ceo_memory.prepare(
         "SELECT COUNT(*) as cnt FROM content_plans cp WHERE NOT EXISTS (SELECT 1 FROM videos v WHERE v.content_plan_id = cp.id)"
       ).first();
-      const unusedPlanCount = backlogCheck ? backlogCheck.cnt : 0;
-      const MAX_CONTENT_BACKLOG = 5;
+      const unusedPlanCount = backlogCheck ? backlogCheck.cnt : (isProductionHalted ? 999 : 0);
+      const MAX_CONTENT_BACKLOG = maxContentBacklog;
 
       if (unusedPlanCount >= MAX_CONTENT_BACKLOG) {
         console.log(`Skipping new content generation: ${unusedPlanCount} unused content plans already in backlog (max ${MAX_CONTENT_BACKLOG}). Letting asset generation catch up first.`);
@@ -3677,11 +3955,15 @@ export default {
             continue;
           }
 
+          const musicUrl = await getMusicTrackUrl(env);
+          if (musicUrl) console.log(`Music track selected for content_plan_id=${contentPlanId}`);
+
           // Store everything the poll handler needs to continue after assembly completes.
           const assemblePayload = JSON.stringify({
             sceneFrameUrls,
             sceneVideoUrls,
             audioUrl: audioDownloadUrl,
+            musicUrl,
             outputFileName: finalVideoFileName,
             thumbnailFileId: thumbUploadResult.fileId,
             thumbnailFileName,
@@ -3699,6 +3981,7 @@ export default {
               sceneFrameUrls,
               sceneVideoUrls,
               audioUrl: audioDownloadUrl,
+              musicUrl,
               b2KeyId: env.B2_KEY_ID,
               b2ApplicationKey: env.B2_APPLICATION_KEY,
               b2BucketId: env.B2_BUCKET_ID,
@@ -3742,10 +4025,11 @@ export default {
         }
       }
 
-      const currentUtcHour = new Date().getUTCHours();
-      const videosToPublish = await env.ai_ceo_memory.prepare(
-        "SELECT * FROM videos WHERE status = 'video_ready' AND (target_publish_hour IS NULL OR target_publish_hour = ?) ORDER BY id ASC LIMIT 1"
-      ).bind(currentUtcHour).all();
+      const videosToPublish = isProductionHalted
+        ? { results: [] }
+        : await env.ai_ceo_memory.prepare(
+            "SELECT * FROM videos WHERE status = 'video_ready' ORDER BY id ASC LIMIT 1"
+          ).all();
 
       for (const video of videosToPublish.results) {
         try {
@@ -3790,10 +4074,22 @@ export default {
           const shortsDescription = `${plan.script}\n\nNew videos posted regularly - subscribe so you don't miss the next one.\n\n#Shorts${topicAnchorHashtags.length ? " " + topicAnchorHashtags.join(" ") : ""}`;
           const videoCategoryId = detectVideoCategory(plan.title);
           const videoTags = generateTags(plan.title);
-          const uploadResult = await uploadVideoToYoutube(accessToken, videoBytes, plan.title, shortsDescription, videoCategoryId, videoTags);
+
+          // If a target hour is set, schedule via YouTube's privacyStatus=private + publishAt
+          // rather than waiting for the exact cron tick — upload immediately, YouTube handles timing.
+          let scheduledPublishAt = null;
+          if (video.target_publish_hour != null) {
+            const now = new Date();
+            const candidate = new Date(now);
+            candidate.setUTCHours(video.target_publish_hour, 0, 0, 0);
+            if (candidate <= now) candidate.setUTCDate(candidate.getUTCDate() + 1);
+            scheduledPublishAt = candidate.toISOString();
+          }
+
+          const uploadResult = await uploadVideoToYoutube(accessToken, videoBytes, plan.title, shortsDescription, videoCategoryId, videoTags, scheduledPublishAt);
           const youtubeVideoId = uploadResult.id;
 
-          console.log(`Video uploaded to YouTube: videoId=${youtubeVideoId}`);
+          console.log(`Video uploaded to YouTube: videoId=${youtubeVideoId}${scheduledPublishAt ? ` (scheduled to go public at ${scheduledPublishAt})` : " (public immediately)"}`);
 
           if (video.thumbnail_url) {
             try {
@@ -4105,6 +4401,7 @@ Respond with only the reflection, no preamble.`;
       await env.ai_ceo_memory.prepare(
         "INSERT INTO scheduler_state (task_name, last_run_at) VALUES (?, ?) ON CONFLICT(task_name) DO UPDATE SET last_run_at = excluded.last_run_at"
       ).bind("video_moderation_block", new Date().toISOString()).run();
+      await checkAndInsertDrawdownHalt(env);
       }
       }
       if (videosToPublish.results.length === 0) {
@@ -4121,6 +4418,12 @@ Respond with only the reflection, no preamble.`;
         if (await shouldRunDelayedFailureSweep(env)) {
           await runDelayedFailureSweep(env);
           await markDelayedFailureSweepRun(env);
+        }
+
+        try {
+          await checkAndRecordVariantWinners(env);
+        } catch (variantWinnerErr) {
+          console.log("Non-fatal: variant winner check failed:", variantWinnerErr.message);
         }
       } else {
         console.log(`Skipping weekly audit/research-proposal/delayed-failure sweep this tick: ${videosToPublish.results.length} video(s) pending publish get subrequest priority.`);
