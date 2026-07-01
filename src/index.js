@@ -160,7 +160,11 @@ async function getYoutubeAccessToken(env) {
   return data.access_token;
 }
 
-async function uploadVideoToYoutube(accessToken, videoBytes, title, description, categoryId = "24", tags = []) {
+async function uploadVideoToYoutube(accessToken, videoBytes, title, description, categoryId = "24", tags = [], publishAt = null) {
+  const statusObj = publishAt
+    ? { privacyStatus: "private", publishAt: publishAt, selfDeclaredMadeForKids: false }
+    : { privacyStatus: "public", selfDeclaredMadeForKids: false };
+
   const metadata = {
     snippet: {
       title: title.slice(0, 100),
@@ -168,10 +172,7 @@ async function uploadVideoToYoutube(accessToken, videoBytes, title, description,
       categoryId: categoryId,
       tags: tags.slice(0, 15)
     },
-    status: {
-      privacyStatus: "public",
-      selfDeclaredMadeForKids: false
-    }
+    status: statusObj
   };
 
   const initRes = await fetch("https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status", {
@@ -721,6 +722,179 @@ async function getAnalyzerUploadUrl(env, fileName) {
     authToken: uploadUrlData.authorizationToken,
     fileName: fileName
   };
+}
+
+async function logVariantWinnersIfReady(env) {
+  const MIN_SAMPLE_SIZE = 8;
+  const MIN_LEAD_RATIO = 1.15;
+
+  for (const { variantType, metric, variantList, label } of [
+    { variantType: "title_style", metric: "AVG(vp.views)", variantList: null, label: "title_style" },
+    { variantType: "hook_intensity", metric: "AVG(vp.average_view_duration)", variantList: null, label: "hook_intensity" }
+  ]) {
+    try {
+      const rows = await env.ai_ceo_memory.prepare(`
+        SELECT pv.variant_text, COUNT(*) as sample_size, ${metric} as score
+        FROM prompt_variants pv
+        JOIN videos v ON v.content_plan_id = pv.content_plan_id
+        JOIN video_performance vp ON vp.video_id = v.id
+        WHERE pv.variant_type = ?
+        GROUP BY pv.variant_text
+      `).bind(variantType).all();
+
+      const qualified = rows.results.filter(r => r.sample_size >= MIN_SAMPLE_SIZE && r.score != null);
+      if (qualified.length < 2) continue;
+
+      const best = qualified.reduce((a, b) => (a.score > b.score ? a : b));
+      const secondBest = qualified.filter(r => r.variant_text !== best.variant_text).reduce((a, b) => (a.score > b.score ? a : b));
+      if (best.score < secondBest.score * MIN_LEAD_RATIO) continue;
+
+      const alreadyLogged = await env.ai_ceo_memory.prepare(
+        "SELECT id FROM reasoning_history WHERE decision_type = ? AND chosen_value = ? AND created_at > datetime('now', '-7 days')"
+      ).bind(`variant_winner_${variantType}`, best.variant_text).first();
+      if (alreadyLogged) continue;
+
+      await env.ai_ceo_memory.prepare(
+        "INSERT INTO reasoning_history (decision_type, chosen_value, reasoning) VALUES (?, ?, ?)"
+      ).bind(
+        `variant_winner_${variantType}`,
+        best.variant_text,
+        `${label} winner: ${best.variant_text} (score=${best.score.toFixed(2)}, n=${best.sample_size}) beats runner-up ${secondBest.variant_text} (score=${secondBest.score.toFixed(2)}, n=${secondBest.sample_size}) by ${((best.score / secondBest.score - 1) * 100).toFixed(1)}%`
+      ).run();
+      console.log(`LOUD LOG: Variant winner logged for ${label}: ${best.variant_text}`);
+    } catch (err) {
+      console.log(`Non-fatal: logVariantWinnersIfReady failed for ${label}:`, err.message);
+    }
+  }
+}
+
+async function getMusicTrackUrl(env) {
+  try {
+    const authData = await b2Authorize(env);
+    const apiUrl = authData.apiInfo.storageApi.apiUrl;
+    const authToken = authData.authorizationToken;
+    const downloadBase = authData.apiInfo.storageApi.downloadUrl;
+
+    const listRes = await fetch(`${apiUrl}/b2api/v3/b2_list_file_names?bucketId=${env.B2_BUCKET_ID}&prefix=music/&maxFileCount=100`, {
+      headers: { "Authorization": authToken }
+    });
+    if (!listRes.ok) return null;
+    const listData = await listRes.json();
+    const tracks = (listData.files || []).filter(f => f.fileName.match(/\.(mp3|m4a|aac|wav|ogg)$/i));
+    if (tracks.length === 0) return null;
+
+    const track = tracks[Math.floor(Math.random() * tracks.length)];
+    return `${downloadBase}/file/ai-ceo-media/${track.fileName}?Authorization=${authToken}`;
+  } catch (err) {
+    console.log("Non-fatal: getMusicTrackUrl failed:", err.message);
+    return null;
+  }
+}
+
+async function isProductionHalted(env) {
+  try {
+    const row = await env.ai_ceo_memory.prepare("SELECT active FROM production_halt WHERE id = 1").first();
+    return row ? row.active === 1 : false;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function checkDrawdownAndMaybeHalt(env) {
+  try {
+    const recentPublished = await env.ai_ceo_memory.prepare(`
+      SELECT v.id, vp.views, v.published_at
+      FROM videos v
+      LEFT JOIN video_performance vp ON vp.video_id = v.id
+      WHERE v.status = 'published' AND v.published_at < datetime('now', '-24 hours')
+      ORDER BY v.published_at DESC
+      LIMIT 5
+    `).all();
+
+    if (recentPublished.results.length < 5) return;
+
+    const allUnderperforming = recentPublished.results.every(r => (r.views || 0) < 5);
+    if (!allUnderperforming) return;
+
+    const alreadyHalted = await isProductionHalted(env);
+    if (alreadyHalted) return;
+
+    await env.ai_ceo_memory.prepare(
+      "INSERT INTO production_halt (id, active, reason, halted_at) VALUES (1, 1, ?, datetime('now')) ON CONFLICT(id) DO UPDATE SET active = 1, reason = excluded.reason, halted_at = excluded.halted_at, resumed_at = NULL"
+    ).bind("Auto-halt: last 5 published videos (≥24h old) all have <5 views — possible systemic content or distribution failure").run();
+
+    const alertMsg = "PRODUCTION AUTO-HALTED: last 5 published videos (all ≥24h old) each have fewer than 5 views. Possible systemic failure (content quality, SEO, or distribution). Review recent videos and resume via POST /admin/resume-production when resolved.";
+    await env.ai_ceo_memory.prepare(
+      "INSERT INTO system_alerts (alert_type, message) VALUES (?, ?)"
+    ).bind("PRODUCTION_AUTO_HALTED", alertMsg).run();
+
+    console.log("LOUD LOG: " + alertMsg);
+  } catch (err) {
+    console.log("Non-fatal: checkDrawdownAndMaybeHalt failed:", err.message);
+  }
+}
+
+async function maybeImplementApprovedProposal(env) {
+  try {
+    const proposal = await env.ai_ceo_memory.prepare(
+      "SELECT id, proposal_type, summary, supporting_data FROM content_proposals WHERE status = 'approved' ORDER BY id ASC LIMIT 1"
+    ).first();
+
+    if (!proposal) return;
+
+    console.log(`LOUD LOG: Found approved content_proposal id=${proposal.id} type=${proposal.proposal_type} — attempting Stage 3 implementation via code self-modification`);
+
+    const changeDescription = `Implement approved proposal (id=${proposal.id}, type=${proposal.proposal_type}): ${proposal.summary}`;
+    const entryId = await proposeAndDeployCodeChange(env, {
+      targetFile: "index.js",
+      whatChanged: changeDescription,
+      why: `Operator-approved content proposal: ${proposal.proposal_type}`,
+      expectedBenefit: proposal.summary,
+      metricName: "approved_proposal_implementation",
+      metricQuery: null,
+      deadlineDays: 14
+    });
+
+    if (entryId) {
+      await env.ai_ceo_memory.prepare(
+        "UPDATE content_proposals SET status = 'implementing' WHERE id = ?"
+      ).bind(proposal.id).run();
+      console.log(`LOUD LOG: Stage 3 code self-mod opened for proposal id=${proposal.id}, self_mod_entry_id=${entryId}`);
+    } else {
+      await env.ai_ceo_memory.prepare(
+        "UPDATE content_proposals SET status = 'implementation_failed' WHERE id = ?"
+      ).bind(proposal.id).run();
+      console.log(`LOUD LOG: Stage 3 code self-mod REJECTED for proposal id=${proposal.id} — safety gate or syntax check blocked it. Status set to implementation_failed.`);
+    }
+  } catch (err) {
+    console.log("LOUD LOG: maybeImplementApprovedProposal threw unexpectedly:", err.message);
+  }
+}
+
+function calculateScheduledPublishAt(targetHour) {
+  const now = new Date();
+  const candidate = new Date(now);
+  candidate.setUTCHours(targetHour, 0, 0, 0);
+  if (candidate <= now) {
+    candidate.setUTCDate(candidate.getUTCDate() + 1);
+  }
+  return candidate.toISOString();
+}
+
+async function shouldRunProductionBurst(env) {
+  const row = await env.ai_ceo_memory.prepare(
+    "SELECT last_run_at FROM scheduler_state WHERE task_name = 'weekly_production_burst'"
+  ).first();
+  const hoursSinceLastRun = row && row.last_run_at
+    ? (Date.now() - new Date(row.last_run_at).getTime()) / (1000 * 60 * 60)
+    : Infinity;
+  return hoursSinceLastRun >= 24 * 7;
+}
+
+async function markBurstRun(env) {
+  await env.ai_ceo_memory.prepare(
+    "INSERT INTO scheduler_state (task_name, last_run_at) VALUES ('weekly_production_burst', ?) ON CONFLICT(task_name) DO UPDATE SET last_run_at = excluded.last_run_at"
+  ).bind(new Date().toISOString()).run();
 }
 
 async function getTaughtVariantPreference(env, variantList, variantTypeLabel) {
@@ -2643,6 +2817,18 @@ export default {
     }
 
 
+    if (url.pathname === "/admin/resume-production" && request.method === "POST") {
+      try {
+        await env.ai_ceo_memory.prepare(
+          "INSERT INTO production_halt (id, active, reason, halted_at, resumed_at) VALUES (1, 0, NULL, NULL, datetime('now')) ON CONFLICT(id) DO UPDATE SET active = 0, resumed_at = datetime('now')"
+        ).run();
+        console.log("LOUD LOG: Production halt manually resumed via /admin/resume-production");
+        return new Response(JSON.stringify({ ok: true, message: "Production resumed." }), { headers: { "Content-Type": "application/json" } });
+      } catch (resumeErr) {
+        return new Response(JSON.stringify({ ok: false, error: resumeErr.message }), { status: 500, headers: { "Content-Type": "application/json" } });
+      }
+    }
+
     if (url.pathname === "/authorize") {
       const scopes = [
         "https://www.googleapis.com/auth/youtube",
@@ -2890,6 +3076,17 @@ export default {
 
   async scheduled(event, env, ctx) {
     try {
+      // Self-healing DB migrations — idempotent, always run first
+      try { await env.ai_ceo_memory.exec("CREATE TABLE IF NOT EXISTS title_pattern_insights (id INTEGER PRIMARY KEY AUTOINCREMENT, query TEXT NOT NULL, analysis TEXT, sample_size INTEGER, collected_at TEXT DEFAULT (datetime('now')))"); } catch (_) {}
+      try { await env.ai_ceo_memory.exec("ALTER TABLE analyzer_inputs ADD COLUMN attempt_count INTEGER DEFAULT 0"); } catch (_) {}
+      try { await env.ai_ceo_memory.exec("ALTER TABLE analyzer_inputs ADD COLUMN b2_file_id TEXT"); } catch (_) {}
+      try { await env.ai_ceo_memory.exec("ALTER TABLE analyzer_inputs ADD COLUMN duration_seconds REAL"); } catch (_) {}
+      try { await env.ai_ceo_memory.exec("ALTER TABLE analyzer_inputs ADD COLUMN niche_tag TEXT"); } catch (_) {}
+      try { await env.ai_ceo_memory.exec("ALTER TABLE videos ADD COLUMN last_moderation_check_at TEXT"); } catch (_) {}
+      try { await env.ai_ceo_memory.exec("ALTER TABLE videos ADD COLUMN scheduled_for TEXT"); } catch (_) {}
+      try { await env.ai_ceo_memory.exec("ALTER TABLE content_proposals ADD COLUMN supporting_data TEXT"); } catch (_) {}
+      try { await env.ai_ceo_memory.exec("CREATE TABLE IF NOT EXISTS production_halt (id INTEGER PRIMARY KEY DEFAULT 1, active INTEGER DEFAULT 0, reason TEXT, halted_at TEXT, resumed_at TEXT)"); } catch (_) {}
+
       let sharedAccessToken = null;
       let sharedChannelId = null;
       try {
@@ -3138,9 +3335,18 @@ export default {
         "SELECT COUNT(*) as cnt FROM content_plans cp WHERE NOT EXISTS (SELECT 1 FROM videos v WHERE v.content_plan_id = cp.id)"
       ).first();
       const unusedPlanCount = backlogCheck ? backlogCheck.cnt : 0;
-      const MAX_CONTENT_BACKLOG = 5;
 
-      if (unusedPlanCount >= MAX_CONTENT_BACKLOG) {
+      const isBurstWeek = await shouldRunProductionBurst(env);
+      if (isBurstWeek) {
+        await markBurstRun(env);
+        console.log("Production burst week detected: raising content backlog ceiling to 7 for this week");
+      }
+      const MAX_CONTENT_BACKLOG = isBurstWeek ? 7 : 5;
+
+      const productionHalted = await isProductionHalted(env);
+      if (productionHalted) {
+        console.log("LOUD LOG: Production is halted (production_halt.active=1). Skipping all content generation this tick. Resume via POST /admin/resume-production.");
+      } else if (unusedPlanCount >= MAX_CONTENT_BACKLOG) {
         console.log(`Skipping new content generation: ${unusedPlanCount} unused content plans already in backlog (max ${MAX_CONTENT_BACKLOG}). Letting asset generation catch up first.`);
       } else {
       let reasonedChoice = null;
@@ -3536,10 +3742,15 @@ export default {
           const finalVideoFileName = `videos/content_plan_${contentPlanId}.mp4`;
 
           console.log(`Calling Render to assemble video from frame sequences for content_plan_id=${contentPlanId}...`);
+          const musicTrackUrl = await getMusicTrackUrl(env);
+          if (musicTrackUrl) {
+            console.log(`Background music track selected for content_plan_id=${contentPlanId}`);
+          }
           const assembleResult = await callRenderAssembler({
             sceneFrameUrls: sceneFrameUrls,
             sceneVideoUrls: sceneVideoUrls,
             audioUrl: audioDownloadUrl,
+            musicUrl: musicTrackUrl || undefined,
             b2KeyId: env.B2_KEY_ID,
             b2ApplicationKey: env.B2_APPLICATION_KEY,
             b2BucketId: env.B2_BUCKET_ID,
@@ -3555,6 +3766,7 @@ export default {
           const oppAgeHours = opp.created_at ? (Date.now() - new Date(opp.created_at + "Z").getTime()) / (1000 * 60 * 60) : 999;
           const isFreshTrend = oppAgeHours <= 3;
           const targetHour = isFreshTrend ? null : await getNextRotationHour(env);
+          const scheduledFor = isFreshTrend ? null : calculateScheduledPublishAt(targetHour !== null ? targetHour : new Date().getUTCHours());
 
 const scriptWords = generatedScript.trim().split(/\s+/).filter(w => w.length > 0);
           const uniqueWords = new Set(scriptWords.map(w => w.toLowerCase()));
@@ -3565,16 +3777,16 @@ const scriptWords = generatedScript.trim().split(/\s+/).filter(w => w.length > 0
           if (scriptWords.length < MIN_SCRIPT_WORDS || uniqueRatio < MIN_UNIQUE_RATIO) {
             console.log(`LOUD LOG: Economics Filter rejected content_plan_id=${contentPlanId}: script too short or repetitive (${scriptWords.length} words, ${(uniqueRatio * 100).toFixed(0)}% unique). Marking as rejected_quality instead of video_ready.`);
             await env.ai_ceo_memory.prepare(
-              "INSERT INTO videos (content_plan_id, status, thumbnail_url, video_file_name, b2_file_ids, target_publish_hour) VALUES (?, ?, ?, ?, ?, ?)"
-            ).bind(contentPlanId, "rejected_quality", thumbnailDownloadUrl, finalVideoFileName, b2FileIds, targetHour).run();
+              "INSERT INTO videos (content_plan_id, status, thumbnail_url, video_file_name, b2_file_ids, target_publish_hour, scheduled_for) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            ).bind(contentPlanId, "rejected_quality", thumbnailDownloadUrl, finalVideoFileName, b2FileIds, targetHour, scheduledFor).run();
             continue;
           }
 
           await env.ai_ceo_memory.prepare(
-            "INSERT INTO videos (content_plan_id, status, thumbnail_url, video_file_name, b2_file_ids, target_publish_hour) VALUES (?, ?, ?, ?, ?, ?)"
-          ).bind(contentPlanId, "video_ready", thumbnailDownloadUrl, finalVideoFileName, b2FileIds, targetHour).run();
+            "INSERT INTO videos (content_plan_id, status, thumbnail_url, video_file_name, b2_file_ids, target_publish_hour, scheduled_for) VALUES (?, ?, ?, ?, ?, ?, ?)"
+          ).bind(contentPlanId, "video_ready", thumbnailDownloadUrl, finalVideoFileName, b2FileIds, targetHour, scheduledFor).run();
 
-          console.log(`Video for content_plan_id=${contentPlanId} is ${isFreshTrend ? "fresh (publishing immediately)" : `not fresh, targeting hour ${targetHour} for rotation`}`);
+          console.log(`Video for content_plan_id=${contentPlanId} is ${isFreshTrend ? "fresh (publishing immediately)" : `scheduled for ${scheduledFor} (hour=${targetHour})`}`);
           console.log(`Video fully assembled for content_plan_id=${contentPlanId}: ${finalVideoFileName} (fileId: ${assembleResult.fileId})`);
         } catch (videoErr) {
           console.log(`ERROR generating/uploading video assets for content_plan_id=${contentPlanId}:`, videoErr.message);
@@ -3599,10 +3811,9 @@ const scriptWords = generatedScript.trim().split(/\s+/).filter(w => w.length > 0
         }
       }
 
-      const currentUtcHour = new Date().getUTCHours();
       const videosToPublish = await env.ai_ceo_memory.prepare(
-        "SELECT * FROM videos WHERE status = 'video_ready' AND (target_publish_hour IS NULL OR target_publish_hour = ?) ORDER BY id ASC LIMIT 1"
-      ).bind(currentUtcHour).all();
+        "SELECT * FROM videos WHERE status = 'video_ready' AND (scheduled_for IS NULL OR scheduled_for <= datetime('now')) ORDER BY id ASC LIMIT 1"
+      ).all();
 
       for (const video of videosToPublish.results) {
         try {
@@ -3647,7 +3858,8 @@ const scriptWords = generatedScript.trim().split(/\s+/).filter(w => w.length > 0
           const shortsDescription = `${plan.script}\n\nNew videos posted regularly - subscribe so you don't miss the next one.\n\n#Shorts${topicAnchorHashtags.length ? " " + topicAnchorHashtags.join(" ") : ""}`;
           const videoCategoryId = detectVideoCategory(plan.title);
           const videoTags = generateTags(plan.title);
-          const uploadResult = await uploadVideoToYoutube(accessToken, videoBytes, plan.title, shortsDescription, videoCategoryId, videoTags);
+          const scheduledPublishAt = video.scheduled_for && video.scheduled_for > new Date().toISOString() ? video.scheduled_for : null;
+          const uploadResult = await uploadVideoToYoutube(accessToken, videoBytes, plan.title, shortsDescription, videoCategoryId, videoTags, scheduledPublishAt);
           const youtubeVideoId = uploadResult.id;
 
           console.log(`Video uploaded to YouTube: videoId=${youtubeVideoId}`);
@@ -3978,6 +4190,24 @@ Respond with only the reflection, no preamble.`;
         if (await shouldRunDelayedFailureSweep(env)) {
           await runDelayedFailureSweep(env);
           await markDelayedFailureSweepRun(env);
+        }
+
+        try {
+          await logVariantWinnersIfReady(env);
+        } catch (variantWinnerErr) {
+          console.log("Non-fatal: logVariantWinnersIfReady failed:", variantWinnerErr.message);
+        }
+
+        try {
+          await checkDrawdownAndMaybeHalt(env);
+        } catch (drawdownErr) {
+          console.log("Non-fatal: checkDrawdownAndMaybeHalt failed:", drawdownErr.message);
+        }
+
+        try {
+          await maybeImplementApprovedProposal(env);
+        } catch (stage3Err) {
+          console.log("LOUD LOG: maybeImplementApprovedProposal threw unexpectedly:", stage3Err.message);
         }
       } else {
         console.log(`Skipping weekly audit/research-proposal/delayed-failure sweep this tick: ${videosToPublish.results.length} video(s) pending publish get subrequest priority.`);
